@@ -40,6 +40,81 @@ final class RuntimeLog: @unchecked Sendable {
     }
 }
 
+private struct CapturedProcessOutput: Sendable {
+    let terminationStatus: Int32
+    let stdout: String
+    let stderr: String
+}
+
+private final class DataBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func set(_ value: Data) {
+        lock.lock()
+        data = value
+        lock.unlock()
+    }
+
+    func value() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return data
+    }
+}
+
+private func runProcessAndCapture(_ process: Process, stdin: Data?) throws -> CapturedProcessOutput {
+    let inputPipe = Pipe()
+    let outputPipe = Pipe()
+    let errorPipe = Pipe()
+
+    process.standardInput = inputPipe
+    process.standardOutput = outputPipe
+    process.standardError = errorPipe
+    try process.run()
+
+    // Close parent-side write handles so reader threads can reach EOF reliably.
+    try? outputPipe.fileHandleForWriting.close()
+    try? errorPipe.fileHandleForWriting.close()
+
+    let outputBox = DataBox()
+    let errorBox = DataBox()
+    let drainGroup = DispatchGroup()
+
+    drainGroup.enter()
+    DispatchQueue.global(qos: .utility).async {
+        let data = (try? outputPipe.fileHandleForReading.readToEnd()) ?? Data()
+        outputBox.set(data)
+        drainGroup.leave()
+    }
+
+    drainGroup.enter()
+    DispatchQueue.global(qos: .utility).async {
+        let data = (try? errorPipe.fileHandleForReading.readToEnd()) ?? Data()
+        errorBox.set(data)
+        drainGroup.leave()
+    }
+
+    if let stdin {
+        inputPipe.fileHandleForWriting.write(stdin)
+    }
+    try? inputPipe.fileHandleForWriting.close()
+
+    process.waitUntilExit()
+    drainGroup.wait()
+
+    let outputText = String(data: outputBox.value(), encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let errorText = String(data: errorBox.value(), encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+    return CapturedProcessOutput(
+        terminationStatus: process.terminationStatus,
+        stdout: outputText,
+        stderr: errorText
+    )
+}
+
 final class Mem0Ingestor: @unchecked Sendable {
     private let scriptURL: URL
     private let baseDirectory: URL
@@ -86,38 +161,21 @@ final class Mem0Ingestor: @unchecked Sendable {
         env["ABOUT_TIME_MEM0_EMBED_MODEL"] = env["ABOUT_TIME_MEM0_EMBED_MODEL"] ?? "openai/text-embedding-3-small"
         process.environment = env
 
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardInput = inputPipe
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
+        let inputData = try? JSONEncoder().encode(payload)
+        let capture: CapturedProcessOutput
         do {
-            try process.run()
+            capture = try runProcessAndCapture(process, stdin: inputData)
         } catch {
             logger.error("Mem0 script launch failed: \(error.localizedDescription)")
             return ("launch_failed", "{\"error\":\"\(error.localizedDescription)\"}")
         }
 
-        if let input = try? JSONEncoder().encode(payload) {
-            inputPipe.fileHandleForWriting.write(input)
-        }
-        try? inputPipe.fileHandleForWriting.close()
-
-        process.waitUntilExit()
-
-        let outputData = (try? outputPipe.fileHandleForReading.readToEnd()) ?? Data()
-        let errorData = (try? errorPipe.fileHandleForReading.readToEnd()) ?? Data()
-        let outputText = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let errorText = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if process.terminationStatus == 0 {
-            return ("ok", outputText)
+        if capture.terminationStatus == 0 {
+            return ("ok", capture.stdout.nilIfEmpty)
         }
 
-        let errorJSON = "{\"stderr\":\"\((errorText ?? "unknown error").replacingOccurrences(of: "\"", with: "\\\""))\"}"
-        return ("failed", outputText ?? errorJSON)
+        let errorJSON = "{\"stderr\":\"\((capture.stderr.nilIfEmpty ?? "unknown error").replacingOccurrences(of: "\"", with: "\\\""))\"}"
+        return ("failed", capture.stdout.nilIfEmpty ?? errorJSON)
     }
 
     private func normalized(_ value: String?) -> String? {
@@ -184,40 +242,23 @@ final class Mem0Searcher: @unchecked Sendable {
             "limit": max(1, min(100, limit))
         ]
 
-        let inputPipe = Pipe()
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardInput = inputPipe
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
+        let inputData = try? JSONSerialization.data(withJSONObject: input, options: [])
+        let capture: CapturedProcessOutput
         do {
-            try process.run()
+            capture = try runProcessAndCapture(process, stdin: inputData)
         } catch {
             logger.error("Mem0 search launch failed: \(error.localizedDescription)")
             return []
         }
 
-        if let data = try? JSONSerialization.data(withJSONObject: input, options: []) {
-            inputPipe.fileHandleForWriting.write(data)
-        }
-        try? inputPipe.fileHandleForWriting.close()
-
-        process.waitUntilExit()
-
-        let outputData = (try? outputPipe.fileHandleForReading.readToEnd()) ?? Data()
-        let errorData = (try? errorPipe.fileHandleForReading.readToEnd()) ?? Data()
-        let outputText = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let errorText = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        guard process.terminationStatus == 0 else {
-            if !errorText.isEmpty {
-                logger.error("Mem0 search failed: \(errorText)")
+        guard capture.terminationStatus == 0 else {
+            if !capture.stderr.isEmpty {
+                logger.error("Mem0 search failed: \(capture.stderr)")
             }
             return []
         }
 
-        guard let payloadData = outputText.data(using: .utf8),
+        guard let payloadData = capture.stdout.data(using: .utf8),
               let raw = try? JSONSerialization.jsonObject(with: payloadData, options: []),
               let object = raw as? [String: Any],
               (object["status"] as? String) == "ok",

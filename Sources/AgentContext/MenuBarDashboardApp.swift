@@ -270,6 +270,8 @@ final class ActivityDashboardStore: ObservableObject {
 
     @Published var memoryQueryText = ""
     @Published var memoryQueryResult = ""
+    @Published var isMemoryQueryLoading = false
+    @Published var memoryQueryError: String?
 
     @Published var isQuitFinalizing = false
 
@@ -280,6 +282,7 @@ final class ActivityDashboardStore: ObservableObject {
     private let runtime: TrackerRuntime
     private var refreshTimer: Timer?
     private var transcriptTimer: Timer?
+    private var memoryQueryTask: Task<Void, Never>?
 
     init(runtime: TrackerRuntime) {
         self.runtime = runtime
@@ -428,11 +431,29 @@ final class ActivityDashboardStore: ObservableObject {
     }
 
     func runMemoryQuery() {
+        memoryQueryTask?.cancel()
+
         let query = memoryQueryText
-        Task {
-            let answer = await runtime.runMemoryQuery(query)
+        memoryQueryResult = ""
+        memoryQueryError = nil
+        isMemoryQueryLoading = true
+
+        let runtime = runtime
+        memoryQueryTask = Task { [weak self] in
+            let answer = await Task.detached(priority: .userInitiated) {
+                await runtime.runMemoryQuery(query)
+            }.value
+
+            guard !Task.isCancelled else { return }
             await MainActor.run {
-                memoryQueryResult = answer
+                guard let self else { return }
+                self.isMemoryQueryLoading = false
+                if answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.memoryQueryError = "No response generated. Check Mem0/OpenRouter settings and try again."
+                    self.memoryQueryResult = ""
+                } else {
+                    self.memoryQueryResult = answer
+                }
             }
         }
     }
@@ -937,15 +958,38 @@ struct ActivityDashboardView: View {
             HStack {
                 TextField("What did I forget this week? / When did I work on ManyChat?", text: $store.memoryQueryText)
                     .textFieldStyle(.roundedBorder)
-                Button("Ask") {
+                Button(store.isMemoryQueryLoading ? "Asking..." : "Ask") {
                     store.runMemoryQuery()
                 }
+                .disabled(store.isMemoryQueryLoading)
             }
 
             ScrollView {
-                Text(store.memoryQueryResult)
-                    .font(.system(size: 12, design: .monospaced))
+                if store.isMemoryQueryLoading {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Querying memory...")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                } else if let memoryQueryError = store.memoryQueryError {
+                    Text(memoryQueryError)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else if store.memoryQueryResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Ask a natural-language question to query your memory history.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text(store.memoryQueryResult)
+                        .font(.system(size: 12, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .frame(minHeight: 80, maxHeight: 120)
         }
