@@ -1,5 +1,5 @@
 import XCTest
-@testable import AboutTimeCLI
+@testable import AgentContext
 
 final class BM25RankerTests: XCTestCase {
     func testScoresAreDeterministic() {

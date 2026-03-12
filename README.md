@@ -20,13 +20,13 @@ It also ships with a native menu bar app, so it works as a practical day-to-day 
 
 Traditional trackers measure apps.
 
-About Time measures work.
+agent-context measures work.
 
 Most tools give you:
 - `Chrome — 2h`
 - `Codex — 3h`
 
-About Time gives you:
+agent-context gives you:
 - `Reviewed PR #556 and #557`
 - `Debugged frontend app auth failures`
 - `Drafted new feature PRD`
@@ -46,7 +46,7 @@ Natural-language queries that actually matter:
 Your local agent can call one CLI command and hydrate itself with your most recent, high-signal context before planning or execution.
 
 ```bash
-about-time-cli --query "what did I forget to finalize this week?" --format json
+agent-context --query "what did I forget to finalize this week?" --format json
 ```
 
 - `--format text` for humans
@@ -105,20 +105,20 @@ Suggested model: google/gemini-3.1-flash-lite-preview
 App mode:
 
 ```bash
-swift run about-time-cli
+swift run agent-context
 ```
 
 CLI tracking mode:
 
 ```bash
-swift run about-time-cli --cli
+swift run agent-context --cli
 ```
 
 Query mode:
 
 ```bash
-swift run about-time-cli --query "what did I work on today?" --format text
-swift run about-time-cli --query "what did I work on today?" --format json
+swift run agent-context --query "what did I work on today?" --format text
+swift run agent-context --query "what did I work on today?" --format json
 ```
 
 Tests:

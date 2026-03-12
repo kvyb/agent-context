@@ -1,6 +1,6 @@
-# About Time Internal Agent CLI (Query Route)
+# Agent Context Internal Agent CLI (Query Route)
 
-This document is for AI agents and automation tools that need to query About Time memories through the local CLI.
+This document is for AI agents and automation tools that need to query Agent Context memories through the local CLI.
 
 ## Purpose
 
@@ -11,7 +11,7 @@ Use the query route to ask natural-language questions about tracked work context
 ## Command
 
 ```bash
-about-time-cli --query "<natural language question>" [--format text|json]
+agent-context --query "<natural language question>" [--format text|json]
 ```
 
 ## Flags
@@ -23,7 +23,7 @@ about-time-cli --query "<natural language question>" [--format text|json]
 
 ## Environment / Runtime Requirements
 
-- About Time data directory must be accessible (`ABOUT_TIME_HOME` or default `~/.about-time`).
+- Agent Context data directory must be accessible (`ABOUT_TIME_HOME` or default `~/.about-time`).
 - Mem0 must be enabled in settings.
 - OpenRouter/OpenAI-compatible API key must be configured in settings or env.
 

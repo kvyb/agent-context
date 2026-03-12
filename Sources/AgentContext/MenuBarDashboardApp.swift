@@ -4,10 +4,10 @@ import SwiftUI
 import ApplicationServices
 
 @MainActor
-enum AboutTimeMenuBarApp {
+enum AgentContextMenuBarApp {
     static func run() {
         let app = NSApplication.shared
-        let delegate = AboutTimeAppDelegate()
+        let delegate = AgentContextAppDelegate()
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
         app.run()
@@ -15,7 +15,7 @@ enum AboutTimeMenuBarApp {
 }
 
 @MainActor
-final class AboutTimeAppDelegate: NSObject, NSApplicationDelegate {
+final class AgentContextAppDelegate: NSObject, NSApplicationDelegate {
     private var runtime: TrackerRuntime?
     private var store: ActivityDashboardStore?
     private var windowController: DashboardWindowController?
@@ -109,7 +109,7 @@ final class MenuBarController: NSObject {
         super.init()
 
         if let button = statusItem.button {
-            button.title = "AT ○"
+            button.title = "AC ○"
             button.target = self
             button.action = #selector(handleStatusClick)
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -127,7 +127,7 @@ final class MenuBarController: NSObject {
     }
 
     private func refreshTitle() {
-        var title = isRecording ? "AT ●" : "AT ○"
+        var title = isRecording ? "AC ●" : "AC ○"
         if isTranscriptRunning {
             title += " T"
         }
@@ -206,7 +206,7 @@ final class DashboardWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "About Time"
+        window.title = "Agent Context"
         window.contentView = hostingView
         window.center()
         window.isReleasedWhenClosed = false
@@ -344,7 +344,7 @@ final class ActivityDashboardStore: ObservableObject {
         if settings.requireTranscriptConsent {
             let alert = NSAlert()
             alert.messageText = "Start Transcript"
-            alert.informativeText = "About Time will capture system audio in rolling 2-minute chunks until you click Stop Transcript or stop recording."
+            alert.informativeText = "Agent Context will capture system audio in rolling 2-minute chunks until you click Stop Transcript or stop recording."
             alert.addButton(withTitle: "Start Transcript")
             alert.addButton(withTitle: "Cancel")
             let response = alert.runModal()
@@ -1162,7 +1162,7 @@ struct SettingsView: View {
                     Toggle("Capture screenshots (activation+3s, then every 30s)", isOn: $store.settingsDraft.captureScreenshots)
                     Toggle("Enable transcript controls", isOn: $store.settingsDraft.transcriptControlsEnabled)
                     Toggle("Require consent confirmation before Start Transcript", isOn: $store.settingsDraft.requireTranscriptConsent)
-                    Toggle("Track About Time app windows", isOn: $store.settingsDraft.includeAboutTimeAppInTracking)
+                    Toggle("Track Agent Context app windows", isOn: $store.settingsDraft.includeSelfAppInTracking)
                 }
             }
 

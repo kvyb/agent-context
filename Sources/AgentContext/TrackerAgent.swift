@@ -290,11 +290,11 @@ final class TrackerAgent: @unchecked Sendable {
             return true
         }
 
-        guard !settingsProvider().includeAboutTimeAppInTracking else {
+        guard !settingsProvider().includeSelfAppInTracking else {
             return false
         }
 
-        if let bundleID = Bundle.main.bundleIdentifier, app.bundleIdentifier == bundleID {
+        if let bundleID = NSRunningApplication.current.bundleIdentifier, app.bundleIdentifier == bundleID {
             return true
         }
         return false

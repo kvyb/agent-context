@@ -176,7 +176,7 @@ final class TrackerRuntime: @unchecked Sendable {
             "openrouter model: \(config.openRouter.model) reasoning=\(config.openRouter.reasoningEffort)",
             "mem0 enabled: \(settings.mem0Enabled) ingest_script=\(config.mem0ScriptURL.path)",
             "mem0 search script: \(config.mem0SearchScriptURL.path)",
-            "track self-app: \(settings.includeAboutTimeAppInTracking)"
+            "track self-app: \(settings.includeSelfAppInTracking)"
         ]
     }
 

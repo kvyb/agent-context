@@ -4,10 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-APP_NAME="About Time"
+APP_NAME="Agent Context"
 APP_BUNDLE_PATH="${1:-/Applications/${APP_NAME}.app}"
-EXECUTABLE_NAME="about-time"
-PRODUCT_BINARY="${PROJECT_ROOT}/.build/release/about-time-cli"
+EXECUTABLE_NAME="agent-context"
+PRODUCT_BINARY="${PROJECT_ROOT}/.build/release/agent-context"
 APP_PARENT_DIR="$(dirname "${APP_BUNDLE_PATH}")"
 
 if [[ ! -d "${APP_PARENT_DIR}" ]]; then
@@ -24,7 +24,7 @@ fi
 
 echo "Building release binary..."
 cd "${PROJECT_ROOT}"
-swift build -c release --product about-time-cli
+swift build -c release --product agent-context
 
 if [[ ! -x "${PRODUCT_BINARY}" ]]; then
   echo "error: missing built binary at ${PRODUCT_BINARY}" >&2
@@ -61,15 +61,15 @@ cat > "${APP_BUNDLE_PATH}/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>About Time</string>
+  <string>Agent Context</string>
   <key>CFBundleExecutable</key>
-  <string>about-time</string>
+  <string>agent-context</string>
   <key>CFBundleIdentifier</key>
-  <string>com.kvyb.about-time</string>
+  <string>com.kvyb.agent-context</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>About Time</string>
+  <string>Agent Context</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

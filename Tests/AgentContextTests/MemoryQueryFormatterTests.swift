@@ -1,5 +1,5 @@
 import XCTest
-@testable import AboutTimeCLI
+@testable import AgentContext
 
 final class MemoryQueryFormatterTests: XCTestCase {
     func testJSONOutputContainsRequiredFields() throws {

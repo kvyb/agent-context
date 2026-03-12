@@ -7,7 +7,7 @@ do {
     } else if CommandLine.arguments.contains("--cli") {
         runCLIMode()
     } else {
-        AboutTimeMenuBarApp.run()
+        AgentContextMenuBarApp.run()
     }
 } catch {
     fputs("fatal: \(error.localizedDescription)\n", stderr)
@@ -17,7 +17,7 @@ do {
 private func runCLIMode() {
     do {
         let runtime = try TrackerRuntime()
-        print("about-time (vNext) CLI mode")
+        print("agent-context (vNext) CLI mode")
         for line in runtime.startupMessages() {
             print(line)
         }
@@ -26,14 +26,14 @@ private func runCLIMode() {
         print("Recording started. Press Ctrl+C to stop.")
 
         signal(SIGINT, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: DispatchQueue.main)
         source.setEventHandler {
             runtime.stopRecording(finalizePendingWork: true)
             exit(0)
         }
         source.resume()
 
-        RunLoop.main.run()
+        dispatchMain()
     } catch {
         fputs("fatal: \(error.localizedDescription)\n", stderr)
         exit(1)

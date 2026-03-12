@@ -20,7 +20,7 @@ final class AppActivityMonitor: @unchecked Sendable {
         let activatedToken = workspaceNotificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
-            queue: .main
+            queue: nil
         ) { [weak self] notification in
             guard
                 let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
@@ -33,7 +33,7 @@ final class AppActivityMonitor: @unchecked Sendable {
         let deactivatedToken = workspaceNotificationCenter.addObserver(
             forName: NSWorkspace.didDeactivateApplicationNotification,
             object: nil,
-            queue: .main
+            queue: nil
         ) { [weak self] notification in
             guard
                 let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
@@ -46,7 +46,7 @@ final class AppActivityMonitor: @unchecked Sendable {
         let sleepToken = workspaceNotificationCenter.addObserver(
             forName: NSWorkspace.willSleepNotification,
             object: nil,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
             self?.onSystemWillSleep?(Date())
         }
@@ -54,7 +54,7 @@ final class AppActivityMonitor: @unchecked Sendable {
         let wakeToken = workspaceNotificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
             self?.onSystemDidWake?(Date())
         }
@@ -62,7 +62,7 @@ final class AppActivityMonitor: @unchecked Sendable {
         let lockToken = distributedNotificationCenter.addObserver(
             forName: Notification.Name("com.apple.screenIsLocked"),
             object: nil,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
             self?.onScreenLocked?(Date())
         }
@@ -70,7 +70,7 @@ final class AppActivityMonitor: @unchecked Sendable {
         let unlockToken = distributedNotificationCenter.addObserver(
             forName: Notification.Name("com.apple.screenIsUnlocked"),
             object: nil,
-            queue: .main
+            queue: nil
         ) { [weak self] _ in
             self?.onScreenUnlocked?(Date())
         }
