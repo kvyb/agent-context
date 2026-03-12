@@ -36,6 +36,7 @@ final class OpenRouterClient: @unchecked Sendable {
     private let timeoutSeconds: TimeInterval
     private let appNameHeader: String?
     private let refererHeader: String?
+    private let userIdentityAliases: [String]
 
     init(config: OpenRouterRuntimeConfig, settings: AppSettings) {
         endpoint = config.endpoint
@@ -44,33 +45,45 @@ final class OpenRouterClient: @unchecked Sendable {
         timeoutSeconds = config.timeoutSeconds
         appNameHeader = settings.openRouterAppNameHeader
         refererHeader = settings.openRouterRefererHeader
+        userIdentityAliases = AppSettings.normalizedAliases(settings.userIdentityAliases)
     }
 
     func analyzeScreenshot(metadata: ArtifactMetadata, apiKey: String) throws -> OpenRouterCallResult {
         let webpData = try webPDataForLLM(from: metadata.path)
         let dataURI = "data:image/webp;base64,\(webpData.base64EncodedString())"
+        let aliasList = userIdentityAliases.isEmpty ? "(none provided)" : userIdentityAliases.joined(separator: ", ")
 
         let systemPrompt = """
         You are an evidence extractor for a work-log tracker analyzing a desktop screenshot.
-        Return strict JSON with keys: summary, project, workspace, task, evidence, entities, insufficient_evidence.
+        Return strict JSON with keys: description, problem, success, user_contribution, suggestion_or_decision,
+        status, confidence, project, workspace, task, evidence, entities, insufficient_evidence.
         Rules:
         - Use only concrete facts visible in the screenshot.
         - Metadata fields (app/window/url/workspace/project) are hints only, never primary evidence.
         - task MUST capture the exact current work item in a short phrase (4-14 words) when inferable.
         - If a visible thread title, doc title, PR title, issue title, or heading exists, map task from it.
         - task should be outcome-oriented (e.g. \"implement durable backfill queue replay\", \"review OpenRouter pricing for embeddings\").
-        - If readable content exists, summary MUST contain 1-3 sentences and at least 2 concrete on-screen details
+        - description must be neutral/factual and always present.
+        - If readable content exists, description should contain 1-3 sentences and at least 2 concrete on-screen details
           (filenames, command text, document titles, chat topics, UI labels, URLs, code symbols, settings labels).
-        - First summary sentence must state what is being worked on now.
-        - Second sentence should describe concrete visible evidence (files/pages/labels/commands).
+        - Inference fields (problem, success, user_contribution, suggestion_or_decision) must be null when unsupported.
+        - status must be one of: none, blocked, in_progress, resolved.
+        - confidence is 0..1 and reflects confidence in inference fields.
         - project/workspace/task must be strings; use empty string when unknown.
-        - evidence must contain 2-6 short factual strings when readable content exists; otherwise [].
+        - evidence should contain visible clues that support inference claims.
         - Focus on task, document, page, file, workspace, project, and employer when visible.
         - Never hallucinate.
         - Do not mention About Time UI unless it is the active app itself.
         - Do not output generic boilerplate like \"user is active in APP\".
+        - Avoid phrasing like \"the user is ...\". Prefer neutral wording like \"Reviewing ...\".
+        - Infer likely authorship when possible, even if the user's alias is not visible.
+        - In chat/email tools, treat outgoing-side message alignment, \"You/Me\" labels, composer ownership,
+          first-person message text, and participant headers as authorship cues.
+        - Use user identity aliases only as hints for authorship inference, never as proof by themselves.
+        - If authorship is inferred, mention it briefly in description and add one explicit evidence item describing the cue.
+        - If authorship is ambiguous, do not assert ownership.
         - Write in dry, specific report style, not conversational style.
-        - If evidence is truly weak or unreadable, set insufficient_evidence=true and summary exactly \"insufficient evidence\".
+        - If evidence is truly weak or unreadable, set insufficient_evidence=true and description exactly \"insufficient evidence\".
         """
 
         let userText = """
@@ -82,6 +95,7 @@ final class OpenRouterClient: @unchecked Sendable {
         URL: \(metadata.window.url ?? "")
         Workspace: \(metadata.window.workspace ?? "")
         Project: \(metadata.window.project ?? "")
+        User identity aliases: \(aliasList)
         """
 
         let payload: [String: Any] = [
@@ -96,7 +110,16 @@ final class OpenRouterClient: @unchecked Sendable {
                     "schema": [
                         "type": "object",
                         "properties": [
-                            "summary": ["type": "string"],
+                            "description": ["type": "string"],
+                            "problem": ["type": ["string", "null"]],
+                            "success": ["type": ["string", "null"]],
+                            "user_contribution": ["type": ["string", "null"]],
+                            "suggestion_or_decision": ["type": ["string", "null"]],
+                            "status": [
+                                "type": "string",
+                                "enum": ["none", "blocked", "in_progress", "resolved"]
+                            ],
+                            "confidence": ["type": "number"],
                             "project": ["type": "string"],
                             "workspace": ["type": "string"],
                             "task": ["type": "string"],
@@ -104,7 +127,21 @@ final class OpenRouterClient: @unchecked Sendable {
                             "entities": ["type": "array", "items": ["type": "string"]],
                             "insufficient_evidence": ["type": "boolean"]
                         ],
-                        "required": ["summary", "project", "workspace", "task", "evidence", "entities", "insufficient_evidence"],
+                        "required": [
+                            "description",
+                            "problem",
+                            "success",
+                            "user_contribution",
+                            "suggestion_or_decision",
+                            "status",
+                            "confidence",
+                            "project",
+                            "workspace",
+                            "task",
+                            "evidence",
+                            "entities",
+                            "insufficient_evidence"
+                        ],
                         "additionalProperties": false
                     ]
                 ]
@@ -771,17 +808,42 @@ func decodeArtifactAnalysis(
     fallbackTaskHint: String? = nil
 ) -> ArtifactAnalysis {
     if let object = parseArtifactJSON(text) {
-        var summary = (object["summary"] as? String)?.nilIfEmpty ?? "insufficient evidence"
-        let transcript = (object["transcript"] as? String)?.nilIfEmpty
-        var project = (object["project"] as? String)?.nilIfEmpty ?? fallbackProject?.nilIfEmpty
-        var workspace = (object["workspace"] as? String)?.nilIfEmpty ?? fallbackWorkspace?.nilIfEmpty
-        var task = (object["task"] as? String)?.nilIfEmpty
+        let transcript = objectString(object, keys: ["transcript"])
+        var description = normalizeArtifactField(
+            objectString(object, keys: ["description", "summary"])
+        ) ?? "insufficient evidence"
+        description = sanitizeSummaryPhrasing(description)
+
+        var project = normalizeArtifactField(objectString(object, keys: ["project"])) ?? fallbackProject?.nilIfEmpty
+        var workspace = normalizeArtifactField(objectString(object, keys: ["workspace"])) ?? fallbackWorkspace?.nilIfEmpty
+        var task = normalizeTask(objectString(object, keys: ["task"]))
         let evidence = uniqueStrings(object["evidence"] as? [String] ?? [])
         var entities = uniqueStrings(object["entities"] as? [String] ?? [])
+        var problem = normalizeArtifactField(objectString(object, keys: ["problem"]))
+        var success = normalizeArtifactField(objectString(object, keys: ["success"]))
+        let userContribution = normalizeArtifactField(objectString(object, keys: ["user_contribution", "userContribution"]))
+        let suggestionOrDecision = normalizeArtifactField(
+            objectString(object, keys: ["suggestion_or_decision", "suggestionOrDecision"])
+        )
+        let confidence = object["confidence"] == nil ? 0 : clampConfidence(object["confidence"])
+        let insufficient = boolValue(object["insufficient_evidence"])
+            ?? boolValue(object["insufficientEvidence"])
+            ?? description.lowercased().contains("insufficient evidence")
 
-        let insufficient = object["insufficient_evidence"] as? Bool ?? summary.lowercased().contains("insufficient evidence")
+        if confidence < highConfidenceInferenceThreshold {
+            problem = nil
+            success = nil
+        }
+
         if insufficient {
             return ArtifactAnalysis(
+                description: "insufficient evidence",
+                problem: nil,
+                success: nil,
+                userContribution: nil,
+                suggestionOrDecision: nil,
+                status: .none,
+                confidence: 0,
                 summary: "insufficient evidence",
                 transcript: transcript,
                 entities: entities,
@@ -793,14 +855,24 @@ func decodeArtifactAnalysis(
             )
         }
 
+        let inferenceSeed = composeArtifactSummary(
+            description: description,
+            problem: problem,
+            success: success,
+            userContribution: userContribution,
+            suggestionOrDecision: suggestionOrDecision,
+            status: .none,
+            insufficient: false
+        )
+
         task = normalizeTask(task)
-            ?? inferTask(summary: summary, evidence: evidence, fallbackHint: fallbackTaskHint)
+            ?? inferTask(summary: inferenceSeed, evidence: evidence, fallbackHint: fallbackTaskHint)
 
         if project == nil {
-            project = inferProject(from: summary, entities: entities)
+            project = inferProject(from: inferenceSeed, entities: entities)
         }
         if workspace == nil {
-            workspace = inferWorkspace(from: summary, entities: entities)
+            workspace = inferWorkspace(from: inferenceSeed, entities: entities)
         }
 
         if let project, !entities.contains(project) {
@@ -813,14 +885,42 @@ func decodeArtifactAnalysis(
             entities.append(task)
         }
 
-        if summary == "{" || summary.count < 24 {
-            summary = fallbackSummary(project: project, workspace: workspace, task: task, evidence: evidence) ?? summary
+        if description == "{" || description.count < 24 {
+            description = fallbackSummary(project: project, workspace: workspace, task: task, evidence: evidence) ?? description
         }
+
+        var status = parseArtifactInferenceStatus(object["status"])
+        if status == .none {
+            if problem != nil {
+                status = .blocked
+            } else if success != nil {
+                status = .resolved
+            } else if userContribution != nil || suggestionOrDecision != nil || task != nil {
+                status = .inProgress
+            }
+        }
+
+        var summary = composeArtifactSummary(
+            description: description,
+            problem: problem,
+            success: success,
+            userContribution: userContribution,
+            suggestionOrDecision: suggestionOrDecision,
+            status: status,
+            insufficient: false
+        )
         if let task, !summaryContainsTask(summary, task: task) {
             summary = "Working on \(task). \(summary)"
         }
 
         return ArtifactAnalysis(
+            description: description,
+            problem: problem,
+            success: success,
+            userContribution: userContribution,
+            suggestionOrDecision: suggestionOrDecision,
+            status: status,
+            confidence: confidence,
             summary: summary,
             transcript: transcript,
             entities: entities,
@@ -834,8 +934,25 @@ func decodeArtifactAnalysis(
 
     let fallback = cleanedFreeformText(text) ?? "insufficient evidence"
     let insufficient = fallback.lowercased().contains("insufficient evidence")
+    let description = insufficient ? "insufficient evidence" : sanitizeSummaryPhrasing(fallback)
+    let summary = composeArtifactSummary(
+        description: description,
+        problem: nil,
+        success: nil,
+        userContribution: nil,
+        suggestionOrDecision: nil,
+        status: .none,
+        insufficient: insufficient
+    )
     return ArtifactAnalysis(
-        summary: fallback,
+        description: description,
+        problem: nil,
+        success: nil,
+        userContribution: nil,
+        suggestionOrDecision: nil,
+        status: .none,
+        confidence: 0,
+        summary: summary,
         transcript: nil,
         entities: [],
         insufficientEvidence: insufficient,
@@ -960,6 +1077,124 @@ func decodeStructuredSynthesis(
         insufficientEvidence: insufficient,
         taskSegments: segments
     )
+}
+
+private let highConfidenceInferenceThreshold = 0.72
+
+private func objectString(_ object: [String: Any], keys: [String]) -> String? {
+    for key in keys {
+        if let text = (object[key] as? String)?.nilIfEmpty {
+            return text
+        }
+    }
+    return nil
+}
+
+private func boolValue(_ raw: Any?) -> Bool? {
+    if let value = raw as? Bool {
+        return value
+    }
+    if let value = raw as? NSNumber {
+        return value.boolValue
+    }
+    if let value = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        switch value {
+        case "true", "1", "yes":
+            return true
+        case "false", "0", "no":
+            return false
+        default:
+            return nil
+        }
+    }
+    return nil
+}
+
+private func normalizeArtifactField(_ text: String?) -> String? {
+    guard var value = text?.nilIfEmpty else { return nil }
+    value = value
+        .replacingOccurrences(of: "\n", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    while value.contains("  ") {
+        value = value.replacingOccurrences(of: "  ", with: " ")
+    }
+    if value == "{" || value == "}" {
+        return nil
+    }
+    return value.nilIfEmpty
+}
+
+private func parseArtifactInferenceStatus(_ raw: Any?) -> ArtifactInferenceStatus {
+    guard let value = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+        return .none
+    }
+
+    switch value {
+    case "blocked", "stalled":
+        return .blocked
+    case "in_progress", "in progress", "active", "working", "ongoing":
+        return .inProgress
+    case "resolved", "done", "complete", "completed", "success":
+        return .resolved
+    default:
+        return .none
+    }
+}
+
+private func composeArtifactSummary(
+    description: String,
+    problem: String?,
+    success: String?,
+    userContribution: String?,
+    suggestionOrDecision: String?,
+    status: ArtifactInferenceStatus,
+    insufficient: Bool
+) -> String {
+    if insufficient {
+        return "insufficient evidence"
+    }
+
+    var parts: [String] = [ensureSentence(sanitizeSummaryPhrasing(description))]
+
+    if let problem {
+        parts.append("Problem: \(ensureSentence(problem))")
+    }
+    if let success {
+        parts.append("Success: \(ensureSentence(success))")
+    }
+    if let userContribution {
+        parts.append("User contribution: \(ensureSentence(userContribution))")
+    }
+    if let suggestionOrDecision {
+        parts.append("Suggestion/decision: \(ensureSentence(suggestionOrDecision))")
+    }
+    if status != .none {
+        parts.append("Status: \(artifactStatusLabel(status)).")
+    }
+
+    return parts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func artifactStatusLabel(_ status: ArtifactInferenceStatus) -> String {
+    switch status {
+    case .none:
+        return "none"
+    case .blocked:
+        return "blocked"
+    case .inProgress:
+        return "in progress"
+    case .resolved:
+        return "resolved"
+    }
+}
+
+private func ensureSentence(_ text: String) -> String {
+    let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let last = value.last else { return value }
+    if [".", "!", "?"].contains(last) {
+        return value
+    }
+    return "\(value)."
 }
 
 private func parseArtifactJSON(_ text: String) -> [String: Any]? {
@@ -1183,6 +1418,27 @@ private func inferTask(summary: String, evidence: [String], fallbackHint: String
         }
     }
     return nil
+}
+
+private func sanitizeSummaryPhrasing(_ summary: String) -> String {
+    var output = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+    let replacements: [(String, String)] = [
+        ("The user is ", ""),
+        ("The user ", ""),
+        ("User is ", "")
+    ]
+
+    for (prefix, replacement) in replacements {
+        if output.hasPrefix(prefix) {
+            output = replacement + output.dropFirst(prefix.count)
+            break
+        }
+    }
+
+    if let first = output.first {
+        output = String(first).uppercased() + output.dropFirst()
+    }
+    return output
 }
 
 private func inferProject(from summary: String, entities: [String]) -> String? {

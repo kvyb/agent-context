@@ -895,8 +895,33 @@ struct ActivityDashboardView: View {
                                     Text("\(timeText(item.timestamp)) • \(item.kind.rawValue)")
                                         .font(.caption.weight(.semibold))
                                         .foregroundStyle(.secondary)
-                                    Text(item.summary)
+                                    Text(item.description)
                                         .font(.system(size: 13))
+                                    if let problem = item.problem?.nilIfEmpty {
+                                        Text("Problem: \(problem)")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(.red)
+                                    }
+                                    if let success = item.success?.nilIfEmpty {
+                                        Text("Success: \(success)")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(.green)
+                                    }
+                                    if let contribution = item.userContribution?.nilIfEmpty {
+                                        Text("Contribution: \(contribution)")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if let suggestion = item.suggestionOrDecision?.nilIfEmpty {
+                                        Text("Suggestion/Decision: \(suggestion)")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if item.status != .none {
+                                        Text("Status: \(artifactStatusText(item.status)) • confidence \(item.confidence, specifier: "%.2f")")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
                                     if let project = item.project?.nilIfEmpty {
                                         Text("Project: \(project)")
                                             .font(.system(size: 11, weight: .semibold))
@@ -956,7 +981,7 @@ struct ActivityDashboardView: View {
                 .font(.headline)
 
             HStack {
-                TextField("What did I forget this week? / When did I work on ManyChat?", text: $store.memoryQueryText)
+                TextField("", text: $store.memoryQueryText)
                     .textFieldStyle(.roundedBorder)
                 Button(store.isMemoryQueryLoading ? "Asking..." : "Ask") {
                     store.runMemoryQuery()
@@ -1025,6 +1050,19 @@ struct ActivityDashboardView: View {
         formatter.timeZone = .autoupdatingCurrent
         formatter.dateFormat = "EEE, MMM d"
         return formatter.string(from: date)
+    }
+
+    private func artifactStatusText(_ status: ArtifactInferenceStatus) -> String {
+        switch status {
+        case .none:
+            return "none"
+        case .blocked:
+            return "blocked"
+        case .inProgress:
+            return "in_progress"
+        case .resolved:
+            return "resolved"
+        }
     }
 }
 
@@ -1177,6 +1215,7 @@ struct DayAppListRowView: View {
 struct SettingsView: View {
     @ObservedObject var store: ActivityDashboardStore
     @State private var apiKeyDraft = ""
+    @State private var userAliasesDraft = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1216,6 +1255,11 @@ struct SettingsView: View {
                     TextField("Mem0 user id", text: $store.settingsDraft.mem0UserID)
                     TextField("Mem0 agent id", text: $store.settingsDraft.mem0AgentID)
                     TextField("Mem0 collection", text: $store.settingsDraft.mem0Collection)
+                    Divider()
+                    TextField("Your work/chat names (comma-separated)", text: $userAliasesDraft)
+                    Text("Use names/handles you appear under at work or in chats (for example: full name, Slack display name, username).")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -1237,6 +1281,7 @@ struct SettingsView: View {
                 }
                 Button("Save") {
                     store.settingsDraft.openRouterAPIKey = apiKeyDraft.nilIfEmpty
+                    store.settingsDraft.userIdentityAliases = AppSettings.parseAliases(from: userAliasesDraft)
                     store.saveSettings()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -1246,6 +1291,7 @@ struct SettingsView: View {
         .frame(width: 760)
         .onAppear {
             apiKeyDraft = store.settingsDraft.openRouterAPIKey ?? ""
+            userAliasesDraft = AppSettings.aliasesText(store.settingsDraft.userIdentityAliases)
         }
     }
 }

@@ -35,6 +35,17 @@ final class AppSettingsStoreTests: XCTestCase {
         XCTAssertEqual(resolvedFromEnv, "from-env")
     }
 
+    func testLoadUsesUserAliasEnvFallbackWhenSettingsMissing() {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let loaded = AppSettingsStore.load(
+            baseDirectory: directory,
+            env: ["ABOUT_TIME_USER_ALIASES": "Jane Doe, @jane, jane doe"]
+        )
+        XCTAssertEqual(loaded.userIdentityAliases, ["Jane Doe", "@jane"])
+    }
+
     private func temporaryDirectory() -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

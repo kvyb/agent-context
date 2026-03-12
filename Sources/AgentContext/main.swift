@@ -2,7 +2,9 @@ import Foundation
 import AppKit
 
 do {
-    if let options = try QueryCLICommand.parse(arguments: CommandLine.arguments) {
+    if let settingsOptions = try SettingsCLICommand.parse(arguments: CommandLine.arguments) {
+        runSettingsMode(settingsOptions)
+    } else if let options = try QueryCLICommand.parse(arguments: CommandLine.arguments) {
         runQueryMode(options)
     } else if CommandLine.arguments.contains("--cli") {
         runCLIMode()
@@ -51,6 +53,17 @@ private func runQueryMode(_ options: QueryCLIOptions) {
             group.leave()
         }
         group.wait()
+    } catch {
+        fputs("fatal: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
+
+private func runSettingsMode(_ options: SettingsCLIOptions) {
+    do {
+        let runtime = try TrackerRuntime()
+        let message = try SettingsCLICommand.run(runtime: runtime, options: options)
+        print(message)
     } catch {
         fputs("fatal: \(error.localizedDescription)\n", stderr)
         exit(1)

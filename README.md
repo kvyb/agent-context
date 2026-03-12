@@ -123,6 +123,12 @@ swift run agent-context --query "what did I work on today?" --format text
 swift run agent-context --query "what did I work on today?" --format json
 ```
 
+Set work/chat identity aliases (used for authorship inference in screenshots):
+
+```bash
+swift run agent-context --set-user-aliases "Jane Doe, @jane, jane.doe"
+```
+
 Tests:
 
 ```bash

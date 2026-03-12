@@ -6,6 +6,7 @@ struct AppSettings: Codable, Sendable {
     var transcriptControlsEnabled: Bool
     var requireTranscriptConsent: Bool
     var includeSelfAppInTracking: Bool
+    var userIdentityAliases: [String]
     var mem0Enabled: Bool
     var mem0UserID: String
     var mem0AgentID: String
@@ -19,6 +20,7 @@ struct AppSettings: Codable, Sendable {
         transcriptControlsEnabled: true,
         requireTranscriptConsent: true,
         includeSelfAppInTracking: false,
+        userIdentityAliases: [],
         mem0Enabled: true,
         mem0UserID: "about-time-user",
         mem0AgentID: "about-time-tracker",
@@ -33,6 +35,7 @@ struct AppSettings: Codable, Sendable {
         transcriptControlsEnabled: Bool,
         requireTranscriptConsent: Bool,
         includeSelfAppInTracking: Bool,
+        userIdentityAliases: [String],
         mem0Enabled: Bool,
         mem0UserID: String,
         mem0AgentID: String,
@@ -45,6 +48,7 @@ struct AppSettings: Codable, Sendable {
         self.transcriptControlsEnabled = transcriptControlsEnabled
         self.requireTranscriptConsent = requireTranscriptConsent
         self.includeSelfAppInTracking = includeSelfAppInTracking
+        self.userIdentityAliases = AppSettings.normalizedAliases(userIdentityAliases)
         self.mem0Enabled = mem0Enabled
         self.mem0UserID = mem0UserID
         self.mem0AgentID = mem0AgentID
@@ -60,6 +64,8 @@ struct AppSettings: Codable, Sendable {
         case requireTranscriptConsent
         case includeSelfAppInTracking
         case includeAboutTimeAppInTracking
+        case userIdentityAliases
+        case userAliases
         case mem0Enabled
         case mem0UserID
         case mem0AgentID
@@ -79,6 +85,11 @@ struct AppSettings: Codable, Sendable {
         includeSelfAppInTracking = try container.decodeIfPresent(Bool.self, forKey: .includeSelfAppInTracking)
             ?? container.decodeIfPresent(Bool.self, forKey: .includeAboutTimeAppInTracking)
             ?? defaults.includeSelfAppInTracking
+        userIdentityAliases = AppSettings.normalizedAliases(
+            try container.decodeIfPresent([String].self, forKey: .userIdentityAliases)
+            ?? container.decodeIfPresent([String].self, forKey: .userAliases)
+            ?? defaults.userIdentityAliases
+        )
         mem0Enabled = try container.decodeIfPresent(Bool.self, forKey: .mem0Enabled) ?? defaults.mem0Enabled
         mem0UserID = try container.decodeIfPresent(String.self, forKey: .mem0UserID) ?? defaults.mem0UserID
         mem0AgentID = try container.decodeIfPresent(String.self, forKey: .mem0AgentID) ?? defaults.mem0AgentID
@@ -94,12 +105,37 @@ struct AppSettings: Codable, Sendable {
         try container.encode(transcriptControlsEnabled, forKey: .transcriptControlsEnabled)
         try container.encode(requireTranscriptConsent, forKey: .requireTranscriptConsent)
         try container.encode(includeSelfAppInTracking, forKey: .includeSelfAppInTracking)
+        try container.encode(AppSettings.normalizedAliases(userIdentityAliases), forKey: .userIdentityAliases)
         try container.encode(mem0Enabled, forKey: .mem0Enabled)
         try container.encode(mem0UserID, forKey: .mem0UserID)
         try container.encode(mem0AgentID, forKey: .mem0AgentID)
         try container.encode(mem0Collection, forKey: .mem0Collection)
         try container.encodeIfPresent(openRouterAppNameHeader, forKey: .openRouterAppNameHeader)
         try container.encodeIfPresent(openRouterRefererHeader, forKey: .openRouterRefererHeader)
+    }
+
+    static func parseAliases(from raw: String?) -> [String] {
+        guard let raw = raw?.nilIfEmpty else { return [] }
+        return normalizedAliases(
+            raw.components(separatedBy: CharacterSet(charactersIn: ",;\n"))
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        )
+    }
+
+    static func aliasesText(_ aliases: [String]) -> String {
+        normalizedAliases(aliases).joined(separator: ", ")
+    }
+
+    static func normalizedAliases(_ aliases: [String]) -> [String] {
+        var seen = Set<String>()
+        var output: [String] = []
+        for alias in aliases {
+            guard let normalized = alias.nilIfEmpty else { continue }
+            let key = normalized.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            output.append(normalized)
+        }
+        return output
     }
 }
 
@@ -123,12 +159,17 @@ enum AppSettingsStore {
             if let envKey = normalized(env["OPENROUTER_API_KEY"] ?? env["ABOUT_TIME_OPENROUTER_API_KEY"]) {
                 defaults.openRouterAPIKey = envKey
             }
+            defaults.userIdentityAliases = AppSettings.parseAliases(from: env["ABOUT_TIME_USER_ALIASES"])
             return defaults
         }
 
         var settings = decoded
         if settings.openRouterAPIKey?.isEmpty != false {
             settings.openRouterAPIKey = normalized(env["OPENROUTER_API_KEY"] ?? env["ABOUT_TIME_OPENROUTER_API_KEY"])
+        }
+        settings.userIdentityAliases = AppSettings.normalizedAliases(settings.userIdentityAliases)
+        if settings.userIdentityAliases.isEmpty {
+            settings.userIdentityAliases = AppSettings.parseAliases(from: env["ABOUT_TIME_USER_ALIASES"])
         }
         return settings
     }

@@ -52,6 +52,13 @@ struct ArtifactMetadata: Codable, Sendable {
 }
 
 struct ArtifactAnalysis: Codable, Sendable {
+    let description: String
+    let problem: String?
+    let success: String?
+    let userContribution: String?
+    let suggestionOrDecision: String?
+    let status: ArtifactInferenceStatus
+    let confidence: Double
     let summary: String
     let transcript: String?
     let entities: [String]
@@ -62,10 +69,20 @@ struct ArtifactAnalysis: Codable, Sendable {
     let evidence: [String]
 
     enum CodingKeys: String, CodingKey {
+        case description
+        case problem
+        case success
+        case userContribution
+        case userContributionSnake = "user_contribution"
+        case suggestionOrDecision
+        case suggestionOrDecisionSnake = "suggestion_or_decision"
+        case status
+        case confidence
         case summary
         case transcript
         case entities
         case insufficientEvidence
+        case insufficientEvidenceSnake = "insufficient_evidence"
         case project
         case workspace
         case task
@@ -73,6 +90,13 @@ struct ArtifactAnalysis: Codable, Sendable {
     }
 
     init(
+        description: String,
+        problem: String? = nil,
+        success: String? = nil,
+        userContribution: String? = nil,
+        suggestionOrDecision: String? = nil,
+        status: ArtifactInferenceStatus = .none,
+        confidence: Double = 0,
         summary: String,
         transcript: String?,
         entities: [String],
@@ -82,6 +106,13 @@ struct ArtifactAnalysis: Codable, Sendable {
         task: String? = nil,
         evidence: [String] = []
     ) {
+        self.description = description
+        self.problem = problem
+        self.success = success
+        self.userContribution = userContribution
+        self.suggestionOrDecision = suggestionOrDecision
+        self.status = status
+        self.confidence = max(0, min(1, confidence))
         self.summary = summary
         self.transcript = transcript
         self.entities = entities
@@ -94,15 +125,72 @@ struct ArtifactAnalysis: Codable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        summary = try container.decode(String.self, forKey: .summary)
+        let decodedSummary = try container.decodeIfPresent(String.self, forKey: .summary)
+        let decodedDescription = try container.decodeIfPresent(String.self, forKey: .description)
+        description = decodedDescription?.nilIfEmpty ?? decodedSummary?.nilIfEmpty ?? "insufficient evidence"
+        summary = decodedSummary?.nilIfEmpty ?? description
+        problem = try container.decodeIfPresent(String.self, forKey: .problem)?.nilIfEmpty
+        success = try container.decodeIfPresent(String.self, forKey: .success)?.nilIfEmpty
+        let decodedUserContribution = try container.decodeIfPresent(String.self, forKey: .userContribution)?.nilIfEmpty
+        let decodedUserContributionSnake = try container.decodeIfPresent(String.self, forKey: .userContributionSnake)?.nilIfEmpty
+        userContribution = decodedUserContribution ?? decodedUserContributionSnake
+
+        let decodedSuggestionOrDecision = try container.decodeIfPresent(String.self, forKey: .suggestionOrDecision)?.nilIfEmpty
+        let decodedSuggestionOrDecisionSnake = try container.decodeIfPresent(String.self, forKey: .suggestionOrDecisionSnake)?.nilIfEmpty
+        suggestionOrDecision = decodedSuggestionOrDecision ?? decodedSuggestionOrDecisionSnake
+
+        if let statusRaw = try container.decodeIfPresent(String.self, forKey: .status)?.nilIfEmpty {
+            let normalizedStatus = statusRaw.lowercased()
+            switch normalizedStatus {
+            case "in_progress", "in progress", "active", "working":
+                status = .inProgress
+            case "blocked", "stalled":
+                status = .blocked
+            case "resolved", "done", "completed":
+                status = .resolved
+            default:
+                status = ArtifactInferenceStatus(rawValue: normalizedStatus) ?? .none
+            }
+        } else {
+            status = .none
+        }
+        confidence = max(0, min(1, try container.decodeIfPresent(Double.self, forKey: .confidence) ?? 0))
         transcript = try container.decodeIfPresent(String.self, forKey: .transcript)
         entities = try container.decodeIfPresent([String].self, forKey: .entities) ?? []
-        insufficientEvidence = try container.decodeIfPresent(Bool.self, forKey: .insufficientEvidence) ?? false
+        let decodedInsufficientEvidence = try container.decodeIfPresent(Bool.self, forKey: .insufficientEvidence)
+        let decodedInsufficientEvidenceSnake = try container.decodeIfPresent(Bool.self, forKey: .insufficientEvidenceSnake)
+        insufficientEvidence = decodedInsufficientEvidence ?? decodedInsufficientEvidenceSnake ?? false
         project = try container.decodeIfPresent(String.self, forKey: .project)
         workspace = try container.decodeIfPresent(String.self, forKey: .workspace)
         task = try container.decodeIfPresent(String.self, forKey: .task)
         evidence = try container.decodeIfPresent([String].self, forKey: .evidence) ?? []
     }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(description, forKey: .description)
+        try container.encodeIfPresent(problem, forKey: .problem)
+        try container.encodeIfPresent(success, forKey: .success)
+        try container.encodeIfPresent(userContribution, forKey: .userContribution)
+        try container.encodeIfPresent(suggestionOrDecision, forKey: .suggestionOrDecision)
+        try container.encode(status, forKey: .status)
+        try container.encode(max(0, min(1, confidence)), forKey: .confidence)
+        try container.encode(summary, forKey: .summary)
+        try container.encodeIfPresent(transcript, forKey: .transcript)
+        try container.encode(entities, forKey: .entities)
+        try container.encode(insufficientEvidence, forKey: .insufficientEvidence)
+        try container.encodeIfPresent(project, forKey: .project)
+        try container.encodeIfPresent(workspace, forKey: .workspace)
+        try container.encodeIfPresent(task, forKey: .task)
+        try container.encode(evidence, forKey: .evidence)
+    }
+}
+
+enum ArtifactInferenceStatus: String, Codable, Sendable, CaseIterable {
+    case none
+    case blocked
+    case inProgress = "in_progress"
+    case resolved
 }
 
 struct IntervalSummary: Codable, Sendable, Identifiable {
@@ -305,6 +393,13 @@ struct EvidenceDetailItem: Identifiable, Sendable {
     let timestamp: Date
     let kind: ArtifactKind
     let appName: String
+    let description: String
+    let problem: String?
+    let success: String?
+    let userContribution: String?
+    let suggestionOrDecision: String?
+    let status: ArtifactInferenceStatus
+    let confidence: Double
     let summary: String
     let transcript: String?
     let entities: [String]
