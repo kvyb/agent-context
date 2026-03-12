@@ -66,8 +66,7 @@ struct MemoryQueryScopeParser: Sendable {
     }
 
     func normalizedQueries(for question: String, plannerQueries: [String]) -> [String] {
-        let extracted = keywordTerms(from: question)
-        let combined = plannerQueries + extracted + [question]
+        let combined = plannerQueries + [question]
         var seen = Set<String>()
         var output: [String] = []
 
@@ -77,9 +76,13 @@ struct MemoryQueryScopeParser: Sendable {
             if seen.insert(key).inserted {
                 output.append(normalized)
             }
-            if output.count >= 8 {
+            if output.count >= 10 {
                 break
             }
+        }
+
+        if output.isEmpty, let fallback = question.nilIfEmpty {
+            output = [fallback]
         }
 
         return output
@@ -100,19 +103,6 @@ struct MemoryQueryScopeParser: Sendable {
             "week", "today", "yesterday", "month"
         ]
         return tokenize(text).filter { !stopWords.contains($0) }
-    }
-
-    private func keywordTerms(from query: String) -> [String] {
-        let terms = queryTerms(for: query)
-        var output: [String] = []
-        var seen = Set<String>()
-        for term in terms where seen.insert(term).inserted {
-            output.append(term)
-            if output.count >= 6 {
-                break
-            }
-        }
-        return output
     }
 
     private func weekStart(containing date: Date) -> Date? {

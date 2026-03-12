@@ -402,16 +402,17 @@ final class OpenRouterClient: @unchecked Sendable {
 
     func planMemoryQuery(question: String, now: Date, apiKey: String) throws -> OpenRouterCallResult {
         let systemPrompt = """
-        You generate retrieval plans for searching a life-log memory store.
-        Return strict JSON with keys: queries, timeframe.
+        You generate compact retrieval plans for a life-log memory store.
+        Return strict JSON only with keys: queries, timeframe.
         Rules:
-        - queries: 2-6 short natural-language retrieval queries.
-        - Include the user's nouns/entities exactly when present.
-        - Expand queries with likely aliases (company/project/app names) only when plausible.
+        - queries: 1-10 short retrieval queries ordered by expected usefulness.
+        - Keep user entities/nouns exactly as written when present.
+        - Add aliases only when high-confidence and concise.
+        - Avoid paraphrase explosion; do not output near-duplicate queries.
         - timeframe must include start, end, label.
         - start/end: ISO8601 timestamp or empty string when not inferable.
-        - label: short label like "today", "this week", "last month", or empty string.
-        - Never answer the user question here; only plan retrieval.
+        - label: short scope hint such as today/this week/last month, else empty string.
+        - Never answer the user question here.
         """
 
         let userPrompt = """
@@ -434,7 +435,8 @@ final class OpenRouterClient: @unchecked Sendable {
                             "queries": [
                                 "type": "array",
                                 "items": ["type": "string"],
-                                "minItems": 1
+                                "minItems": 1,
+                                "maxItems": 10
                             ],
                             "timeframe": [
                                 "type": "object",

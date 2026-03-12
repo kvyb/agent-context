@@ -16,6 +16,8 @@ Think: time tracker + semantic memory.
 
 It also ships with a native menu bar app, so it works as a practical day-to-day time tracker with high-quality annotations, not just backend infrastructure.
 
+![Agent Context query UI](docs/assets/screenshots/agent-context-ui.png)
+
 ## The Big Idea
 
 Traditional trackers measure apps.

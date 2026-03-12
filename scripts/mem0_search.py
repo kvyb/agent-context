@@ -3,7 +3,8 @@
 
 Reads one JSON payload from stdin:
 {
-  "query": "...",
+  "query": "...",                  # optional fallback
+  "queries": ["...", "..."],       # preferred
   "start": "ISO8601 or empty",
   "end": "ISO8601 or empty",
   "limit": 20
@@ -48,6 +49,46 @@ def parse_iso(value: str | None) -> datetime | None:
         return datetime.fromisoformat(text)
     except Exception:
         return None
+
+
+def parse_queries(payload: dict[str, Any]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+
+    raw_queries = payload.get("queries")
+    if isinstance(raw_queries, list):
+        for item in raw_queries:
+            if not isinstance(item, str):
+                continue
+            normalized = item.strip()
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(normalized)
+            if len(output) >= 10:
+                return output
+
+    fallback_query = payload.get("query")
+    if isinstance(fallback_query, str):
+        normalized = fallback_query.strip()
+        if normalized and normalized.lower() not in seen:
+            output.append(normalized)
+
+    return output[:10]
+
+
+def parse_score(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+    return 0.0
 
 
 def build_mem0_config() -> dict[str, Any]:
@@ -157,7 +198,7 @@ def call_search(memory, query: str, user_id: str, agent_id: str, limit: int) -> 
     return []
 
 
-def normalize_hit(raw: dict[str, Any]) -> dict[str, Any]:
+def normalize_hit(raw: dict[str, Any], retrieved_query: str, query_rank: int) -> dict[str, Any]:
     metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
     memory_text = raw.get("memory") or raw.get("text") or raw.get("content") or ""
     if not isinstance(memory_text, str):
@@ -167,6 +208,10 @@ def normalize_hit(raw: dict[str, Any]) -> dict[str, Any]:
     project = raw.get("project") or metadata.get("project")
     occurred_at = raw.get("occurred_at") or metadata.get("occurred_at")
 
+    normalized_metadata = {k: str(v) for k, v in metadata.items()}
+    normalized_metadata["retrieved_query"] = retrieved_query
+    normalized_metadata["query_rank"] = str(query_rank)
+
     return {
         "id": raw.get("id"),
         "score": raw.get("score"),
@@ -174,7 +219,7 @@ def normalize_hit(raw: dict[str, Any]) -> dict[str, Any]:
         "app_name": app_name if isinstance(app_name, str) else None,
         "project": project if isinstance(project, str) else None,
         "occurred_at": occurred_at if isinstance(occurred_at, str) else None,
-        "metadata": {k: str(v) for k, v in metadata.items()},
+        "metadata": normalized_metadata,
     }
 
 
@@ -198,10 +243,59 @@ def filter_hits_by_time(hits: list[dict[str, Any]], start: datetime | None, end:
     return filtered
 
 
+def dedupe_and_sort_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    best: dict[str, dict[str, Any]] = {}
+
+    for hit in hits:
+        memory = hit.get("memory")
+        if not isinstance(memory, str) or not memory.strip():
+            continue
+
+        occurred_at = hit.get("occurred_at")
+        occurred_key = occurred_at if isinstance(occurred_at, str) else ""
+        raw_id = hit.get("id")
+        if isinstance(raw_id, str) and raw_id.strip():
+            key = f"id:{raw_id.strip()}"
+        else:
+            key = f"text:{memory.strip().lower()}::{occurred_key}"
+
+        existing = best.get(key)
+        if existing is None:
+            best[key] = hit
+            continue
+
+        existing_score = parse_score(existing.get("score"))
+        candidate_score = parse_score(hit.get("score"))
+        if candidate_score > existing_score:
+            best[key] = hit
+
+    def query_rank(hit: dict[str, Any]) -> int:
+        metadata = hit.get("metadata")
+        if isinstance(metadata, dict):
+            rank_raw = metadata.get("query_rank")
+            if isinstance(rank_raw, str) and rank_raw.isdigit():
+                return int(rank_raw)
+        return 99
+
+    def occurred_ts(hit: dict[str, Any]) -> float:
+        raw = hit.get("occurred_at")
+        if not isinstance(raw, str):
+            return 0.0
+        parsed = parse_iso(raw)
+        if parsed is None:
+            return 0.0
+        return parsed.timestamp()
+
+    return sorted(
+        best.values(),
+        key=lambda hit: (-parse_score(hit.get("score")), query_rank(hit), -occurred_ts(hit)),
+    )
+
+
 def main() -> int:
     payload = load_input()
-    query = str(payload.get("query", "")).strip()
-    if not query:
+    queries = parse_queries(payload)
+    if not queries:
         print(json.dumps({"status": "ok", "hits": []}))
         return 0
 
@@ -245,15 +339,20 @@ def main() -> int:
             )
             return 1
 
-    try:
-        raw_hits = call_search(memory, query=query, user_id=user_id, agent_id=agent_id, limit=limit)
-    except Exception as exc:
-        print(json.dumps({"status": "error", "error": f"mem0 search failed: {exc}"}))
-        return 1
+    collected: list[dict[str, Any]] = []
+    for index, query in enumerate(queries):
+        try:
+            raw_hits = call_search(memory, query=query, user_id=user_id, agent_id=agent_id, limit=limit)
+        except Exception as exc:
+            print(json.dumps({"status": "error", "error": f"mem0 search failed for query '{query}': {exc}"}))
+            return 1
 
-    hits = [normalize_hit(hit) for hit in raw_hits]
-    hits = [hit for hit in hits if hit.get("memory")]
-    hits = filter_hits_by_time(hits, start=start, end=end)
+        normalized_hits = [normalize_hit(hit, retrieved_query=query, query_rank=index) for hit in raw_hits]
+        normalized_hits = [hit for hit in normalized_hits if hit.get("memory")]
+        collected.extend(normalized_hits)
+
+    hits = filter_hits_by_time(collected, start=start, end=end)
+    hits = dedupe_and_sort_hits(hits)
     print(json.dumps({"status": "ok", "hits": hits[:limit]}, default=str))
     return 0
 

@@ -194,8 +194,8 @@ final class Mem0Searcher: @unchecked Sendable {
         self.logger = logger
     }
 
-    func search(
-        query: String,
+    func searchBatch(
+        queries: [String],
         start: Date?,
         end: Date?,
         limit: Int,
@@ -206,6 +206,11 @@ final class Mem0Searcher: @unchecked Sendable {
         }
 
         guard FileManager.default.fileExists(atPath: scriptURL.path) else {
+            return []
+        }
+
+        let normalizedQueries = normalizeQueries(queries)
+        guard !normalizedQueries.isEmpty else {
             return []
         }
 
@@ -236,7 +241,8 @@ final class Mem0Searcher: @unchecked Sendable {
         process.environment = env
 
         let input: [String: Any] = [
-            "query": query,
+            "queries": normalizedQueries,
+            "query": normalizedQueries[0],
             "start": start.map { ISO8601DateFormatter().string(from: $0) } ?? "",
             "end": end.map { ISO8601DateFormatter().string(from: $0) } ?? "",
             "limit": max(1, min(100, limit))
@@ -300,7 +306,38 @@ final class Mem0Searcher: @unchecked Sendable {
         }
     }
 
+    func search(
+        query: String,
+        start: Date?,
+        end: Date?,
+        limit: Int,
+        settings: AppSettings
+    ) -> [Mem0SearchHit] {
+        searchBatch(
+            queries: [query],
+            start: start,
+            end: end,
+            limit: limit,
+            settings: settings
+        )
+    }
+
     private func normalized(_ value: String?) -> String? {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    }
+
+    private func normalizeQueries(_ queries: [String]) -> [String] {
+        var seen = Set<String>()
+        var output: [String] = []
+        for query in queries {
+            guard let normalizedQuery = normalized(query) else { continue }
+            let key = normalizedQuery.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            output.append(normalizedQuery)
+            if output.count >= 10 {
+                break
+            }
+        }
+        return output
     }
 }
