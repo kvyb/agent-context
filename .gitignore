@@ -1,0 +1,44 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager / Xcode build output
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+*.dSYM/
+*.xcarchive
+*.app
+
+# Editor settings
+.vscode/
+.idea/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python helper artifacts (mem0 scripts)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# About Time runtime artifacts (when data dir is pointed inside repo)
+.about-time/
+screenshots/
+audio/
+reports/
+logs/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+*.log
