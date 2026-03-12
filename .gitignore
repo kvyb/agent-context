@@ -31,7 +31,7 @@ venv/
 
 # About Time runtime artifacts (when data dir is pointed inside repo)
 .about-time/
-screenshots/
+/screenshots/
 audio/
 reports/
 logs/
