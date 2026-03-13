@@ -181,9 +181,18 @@ final class OpenRouterClient: @unchecked Sendable {
         You are an evidence extractor for meeting audio.
         Return strict JSON with keys: summary, transcript, entities, insufficient_evidence.
         Rules:
-        - Transcript should be concise and factual.
-        - Summary should list meeting topics, decisions, action items, and owners when audible.
-        - If content is unusable, set insufficient_evidence=true and write \"insufficient evidence\".
+        - Transcript must be detailed and near-verbatim, not concise.
+        - Preserve important phrasing and include speaker turns using labels like \"S1:\", \"S2:\" when speakers can be distinguished.
+        - Do not omit concrete details (numbers, names, dates, deadlines, commitments, blockers, decisions, tools, file names).
+        - If words are uncertain, mark them inline as \"[unclear]\" instead of dropping surrounding context.
+        - Summary must be thorough and structured with these labeled lines in order:
+          Topics:
+          Decisions:
+          Action Items:
+          Open Questions/Risks:
+        - In Action Items, include owner when inferable; otherwise use \"owner unknown\".
+        - Set insufficient_evidence=true only when most of the audio is unintelligible or irrelevant noise.
+        - If insufficient_evidence=true, summary and transcript must both be exactly \"insufficient evidence\".
         - Never invent details.
         """
 
