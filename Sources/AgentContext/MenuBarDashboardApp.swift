@@ -201,7 +201,7 @@ final class DashboardWindowController: NSWindowController {
         let hostingView = NSHostingView(rootView: view)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1360, height: 860),
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 780),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -231,6 +231,20 @@ final class DashboardWindowController: NSWindowController {
             showWindow(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+}
+
+struct OpenRouterModelOption: Identifiable, Hashable, Sendable {
+    let id: String
+    let name: String?
+    let inputModalities: [String]
+
+    var normalizedInputModalities: Set<String> {
+        Set(inputModalities.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
+    }
+
+    func supportsAnyInputModalities(_ modalities: Set<String>) -> Bool {
+        !normalizedInputModalities.isDisjoint(with: modalities)
     }
 }
 
@@ -265,8 +279,16 @@ final class ActivityDashboardStore: ObservableObject {
     @Published var settingsDraft: AppSettings
     @Published var settingsMessage: String?
     @Published var settingsError: String?
+    @Published var updateStatus: AppUpdateStatus?
+    @Published var updateMessage: String?
+    @Published var updateError: String?
+    @Published var isCheckingForUpdates = false
+    @Published var isApplyingUpdate = false
     @Published var usageToday = LLMUsageTotals()
     @Published var usageAllTime = LLMUsageTotals()
+    @Published var availableOpenRouterModels: [OpenRouterModelOption] = []
+    @Published var openRouterModelsError: String?
+    @Published var isLoadingOpenRouterModels = false
 
     @Published var memoryQueryText = ""
     @Published var memoryQueryResult = ""
@@ -415,11 +437,23 @@ final class ActivityDashboardStore: ObservableObject {
         settingsDraft = runtime.loadSettings()
         settingsMessage = nil
         settingsError = nil
+        updateMessage = nil
+        updateError = nil
+        openRouterModelsError = nil
+        settingsDraft.openRouterModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterModel)
+        settingsDraft.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterAudioModel)
+        settingsDraft.openRouterTextModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterTextModel)
+        availableOpenRouterModels = withSelectedModels(availableOpenRouterModels)
         isSettingsPresented = true
+        checkForAppUpdate()
+        refreshOpenRouterModels(force: true)
     }
 
     func saveSettings() {
         do {
+            settingsDraft.openRouterModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterModel)
+            settingsDraft.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterAudioModel)
+            settingsDraft.openRouterTextModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterTextModel)
             try runtime.saveSettings(settingsDraft)
             settingsMessage = "Settings saved"
             settingsError = nil
@@ -427,6 +461,103 @@ final class ActivityDashboardStore: ObservableObject {
         } catch {
             settingsError = error.localizedDescription
             settingsMessage = nil
+        }
+    }
+
+    func checkForAppUpdate() {
+        guard !isCheckingForUpdates, !isApplyingUpdate else { return }
+        isCheckingForUpdates = true
+        updateError = nil
+
+        let runtime = runtime
+        Task { [weak self] in
+            do {
+                let status = try await Task.detached(priority: .utility) {
+                    try runtime.checkForUpdatesAgainstMain()
+                }.value
+
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isCheckingForUpdates = false
+                    self.updateStatus = status
+                    self.updateMessage = self.updateSummaryText(status)
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isCheckingForUpdates = false
+                    self.updateError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func applyAppUpdate() {
+        guard !isApplyingUpdate, !isCheckingForUpdates else { return }
+        isApplyingUpdate = true
+        updateError = nil
+
+        let runtime = runtime
+        Task { [weak self] in
+            do {
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try runtime.updateFromMainRebuildAndRestart()
+                }.value
+
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isApplyingUpdate = false
+                    self.updateStatus = result.status
+                    self.updateMessage = result.message
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isApplyingUpdate = false
+                    self.updateError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func refreshOpenRouterModels(force: Bool = false) {
+        guard !isLoadingOpenRouterModels else { return }
+        if !force && !availableOpenRouterModels.isEmpty {
+            return
+        }
+
+        isLoadingOpenRouterModels = true
+        openRouterModelsError = nil
+
+        let endpoint = runtime.config.openRouter.endpoint
+        let env = runtime.config.environment
+        let settings = settingsDraft
+        let apiKey = AppSettingsStore.resolvedOpenRouterKey(settings: settings, env: env)
+
+        Task { [weak self] in
+            do {
+                let models = try await Self.fetchOpenRouterModels(
+                    endpoint: endpoint,
+                    apiKey: apiKey,
+                    appNameHeader: settings.openRouterAppNameHeader,
+                    refererHeader: settings.openRouterRefererHeader
+                )
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isLoadingOpenRouterModels = false
+                    self.availableOpenRouterModels = self.withSelectedModels(models)
+                    self.settingsDraft.openRouterModel = AppSettings.normalizedOpenRouterModel(self.settingsDraft.openRouterModel)
+                    self.settingsDraft.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(self.settingsDraft.openRouterAudioModel)
+                    self.settingsDraft.openRouterTextModel = AppSettings.normalizedOpenRouterModel(self.settingsDraft.openRouterTextModel)
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isLoadingOpenRouterModels = false
+                    self.availableOpenRouterModels = self.withSelectedModels(self.availableOpenRouterModels)
+                    self.openRouterModelsError = error.localizedDescription
+                }
+            }
         }
     }
 
@@ -459,15 +590,15 @@ final class ActivityDashboardStore: ObservableObject {
     }
 
     func requestQuit() {
+        guard !isQuitFinalizing else { return }
         isQuitFinalizing = true
+        isSettingsPresented = false
+        onCloseDashboard?()
 
-        Task {
-            runtime.stopRecording(finalizePendingWork: true)
-            await MainActor.run {
-                isQuitFinalizing = false
-                NSApplication.shared.terminate(nil)
-            }
-        }
+        // Best-effort fast shutdown; quit should not block on pending analysis drains.
+        runtime.stopTranscript()
+        runtime.stopRecording(finalizePendingWork: false)
+        NSApplication.shared.terminate(nil)
     }
 
     func closeDashboard() {
@@ -654,11 +785,179 @@ final class ActivityDashboardStore: ObservableObject {
         transcriptElapsedText = ""
     }
 
+    private func updateSummaryText(_ status: AppUpdateStatus) -> String {
+        let localShort = String(status.localCommit.prefix(8))
+        let remoteShort = String(status.remoteCommit.prefix(8))
+
+        switch status.relationship {
+        case .upToDate:
+            return "Up to date (\(localShort))."
+        case .behind:
+            return "Update available: \(localShort) → \(remoteShort)."
+        case .ahead:
+            return "Local checkout is ahead of origin/main."
+        case .diverged:
+            return "Local branch has diverged from origin/main."
+        }
+    }
+
     private func elapsedText(from start: Date) -> String {
         let seconds = max(0, Int(Date().timeIntervalSince(start)))
         let minutes = seconds / 60
         let remainder = seconds % 60
         return String(format: "%02d:%02d", minutes, remainder)
+    }
+
+    private func withSelectedModels(_ models: [OpenRouterModelOption]) -> [OpenRouterModelOption] {
+        var byID = [String: OpenRouterModelOption]()
+        for model in models {
+            byID[model.id] = model
+        }
+
+        for selected in selectedModelIDs() {
+            if byID[selected] == nil {
+                byID[selected] = OpenRouterModelOption(id: selected, name: nil, inputModalities: [])
+            }
+        }
+
+        return byID.values.sorted { lhs, rhs in
+            lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
+        }
+    }
+
+    private func selectedModelIDs() -> [String] {
+        var seen = Set<String>()
+        var output: [String] = []
+        let candidates = [
+            AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterModel),
+            AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterAudioModel),
+            AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterTextModel)
+        ]
+        for candidate in candidates {
+            guard seen.insert(candidate).inserted else { continue }
+            output.append(candidate)
+        }
+        return output
+    }
+
+    private static func fetchOpenRouterModels(
+        endpoint: URL,
+        apiKey: String?,
+        appNameHeader: String?,
+        refererHeader: String?
+    ) async throws -> [OpenRouterModelOption] {
+        let modelsURL = modelsURL(from: endpoint)
+        var request = URLRequest(url: modelsURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 20
+        if let apiKey, !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        if let appNameHeader, !appNameHeader.isEmpty {
+            request.setValue(appNameHeader, forHTTPHeaderField: "X-Title")
+        }
+        if let refererHeader, !refererHeader.isEmpty {
+            request.setValue(refererHeader, forHTTPHeaderField: "HTTP-Referer")
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 500
+        guard statusCode < 400 else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(
+                domain: "OpenRouterModels",
+                code: statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "Model list request failed (\(statusCode)): \(body)"]
+            )
+        }
+
+        let decoded = try JSONDecoder().decode(OpenRouterModelListResponse.self, from: data)
+        let options = decoded.data.compactMap { model -> OpenRouterModelOption? in
+            guard let modelID = model.id.nilIfEmpty else { return nil }
+            let modalities = normalizedInputModalities(from: model.architecture)
+            return OpenRouterModelOption(
+                id: modelID,
+                name: model.name?.nilIfEmpty,
+                inputModalities: Array(modalities)
+            )
+        }
+        if options.isEmpty {
+            throw NSError(
+                domain: "OpenRouterModels",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "No models returned from \(modelsURL.absoluteString)."]
+            )
+        }
+
+        return options.sorted { lhs, rhs in
+            lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
+        }
+    }
+
+    private static func normalizedInputModalities(from architecture: OpenRouterModelArchitecture?) -> Set<String> {
+        var output = Set<String>()
+        for modality in architecture?.inputModalities ?? [] {
+            if let normalized = modality.nilIfEmpty?.lowercased() {
+                output.insert(normalized)
+            }
+        }
+
+        if output.isEmpty, let modality = architecture?.modality?.lowercased() {
+            let inputPart = modality.components(separatedBy: "->").first ?? modality
+            let components = inputPart
+                .split(separator: "+")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            for component in components where !component.isEmpty {
+                output.insert(component)
+            }
+        }
+
+        return output
+    }
+
+    private static func modelsURL(from endpoint: URL) -> URL {
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            return endpoint
+        }
+
+        var path = components.path
+        if path.hasSuffix("/chat/completions") {
+            path.removeLast("/chat/completions".count)
+        } else if path.hasSuffix("/completions") {
+            path.removeLast("/completions".count)
+        } else if path.hasSuffix("/") {
+            path.removeLast()
+        } else if let slash = path.lastIndex(of: "/"), slash > path.startIndex {
+            path = String(path[..<slash])
+        } else {
+            path = ""
+        }
+
+        let normalizedPrefix = path.hasSuffix("/") ? path : path + "/"
+        components.path = normalizedPrefix + "models"
+        components.queryItems = [URLQueryItem(name: "output_modality", value: "all")]
+        components.fragment = nil
+        return components.url ?? endpoint
+    }
+
+    private struct OpenRouterModelListResponse: Decodable {
+        let data: [OpenRouterModel]
+    }
+
+    private struct OpenRouterModel: Decodable {
+        let id: String
+        let name: String?
+        let architecture: OpenRouterModelArchitecture?
+    }
+
+    private struct OpenRouterModelArchitecture: Decodable {
+        let modality: String?
+        let inputModalities: [String]?
+
+        private enum CodingKeys: String, CodingKey {
+            case modality
+            case inputModalities = "input_modalities"
+        }
     }
 }
 
@@ -680,19 +979,14 @@ struct ActivityDashboardView: View {
     var body: some View {
         VStack(spacing: 0) {
             topBar
-                .padding(12)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
                 .background(.thinMaterial)
 
             Divider()
 
             contentBody
-                .padding(12)
-
-            Divider()
-
-            memoryQueryPanel
-                .padding(12)
-                .background(Color(NSColor.windowBackgroundColor))
+                .padding(10)
         }
         .overlay(alignment: .center) {
             if store.isQuitFinalizing {
@@ -705,7 +999,7 @@ struct ActivityDashboardView: View {
     }
 
     private var topBar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Button(store.isRecording ? "Stop Recording" : "Start Recording") {
                 if store.isRecording {
                     store.stopRecording()
@@ -736,7 +1030,7 @@ struct ActivityDashboardView: View {
             DatePicker("Day", selection: $store.selectedDay, displayedComponents: .date)
                 .labelsHidden()
                 .datePickerStyle(.field)
-                .frame(width: 150)
+                .frame(width: 132)
 
             Spacer()
 
@@ -753,10 +1047,17 @@ struct ActivityDashboardView: View {
                     .labelStyle(.titleAndIcon)
             }
         }
+        .controlSize(.regular)
     }
 
     private var contentBody: some View {
-        HStack(alignment: .top, spacing: 16) {
+        HStack(alignment: .top, spacing: 12) {
+            askMeAnythingColumn
+                .frame(width: 340)
+                .frame(maxHeight: .infinity, alignment: .top)
+
+            Divider()
+
             VStack(alignment: .leading, spacing: 12) {
                 usageOverviewCard
                 appsListCard
@@ -766,16 +1067,16 @@ struct ActivityDashboardView: View {
             Divider()
 
             appDetailsPanel
-                .frame(width: 420)
+                .frame(width: 390)
         }
     }
 
     private var usageOverviewCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("App & Website Activity")
-                        .font(.title3.weight(.bold))
+                        .font(.headline.weight(.semibold))
                     Text("Updated \(timeText(Date(), format: "HH:mm"))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -787,10 +1088,10 @@ struct ActivityDashboardView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("Usage")
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Text(durationCompact(selectedDayUsage))
-                    .font(.system(size: 46, weight: .semibold, design: .rounded))
+                    .font(.system(size: 40, weight: .semibold, design: .rounded))
                 Text(store.selectedRangeTitle)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -808,16 +1109,16 @@ struct ActivityDashboardView: View {
                 onSelectHour: { store.selectHour($0) }
             )
         }
-        .padding(16)
+        .padding(12)
         .background(Color(NSColor.textBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var appsListCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Show Apps")
-                    .font(.title3.weight(.semibold))
+                    .font(.headline.weight(.semibold))
                 Spacer()
                 if store.selectedHour != nil {
                     Button("All Day") {
@@ -828,7 +1129,7 @@ struct ActivityDashboardView: View {
                 }
                 TextField("Search", text: $store.appSearchText)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 240)
+                    .frame(width: 180)
             }
 
             Text("Scope: \(store.selectedRangeTitle)")
@@ -867,13 +1168,13 @@ struct ActivityDashboardView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(16)
+        .padding(12)
         .background(Color(NSColor.textBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var appDetailsPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Text("App Activity Log")
                 .font(.headline)
 
@@ -973,21 +1274,25 @@ struct ActivityDashboardView: View {
             }
             Spacer()
         }
+        .padding(12)
+        .background(Color(NSColor.textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    private var memoryQueryPanel: some View {
+    private var askMeAnythingColumn: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Ask Me Anything")
-                .font(.headline)
+                .font(.title3.weight(.semibold))
 
             HStack {
-                TextField("", text: $store.memoryQueryText)
+                TextField("What did I forget this week? / When did I work on X?", text: $store.memoryQueryText)
                     .textFieldStyle(.roundedBorder)
                 Button(store.isMemoryQueryLoading ? "Asking..." : "Ask") {
                     store.runMemoryQuery()
                 }
-                .disabled(store.isMemoryQueryLoading)
+                .disabled(!canRunQuery)
             }
+            .controlSize(.regular)
 
             ScrollView {
                 if store.isMemoryQueryLoading {
@@ -995,29 +1300,41 @@ struct ActivityDashboardView: View {
                         ProgressView()
                             .controlSize(.small)
                         Text("Querying memory...")
-                            .font(.system(size: 12))
+                            .font(.system(size: 14))
                             .foregroundStyle(.secondary)
                         Spacer()
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 } else if let memoryQueryError = store.memoryQueryError {
                     Text(memoryQueryError)
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.red)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else if store.memoryQueryResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text("Ask a natural-language question to query your memory history.")
-                        .font(.system(size: 12))
+                        .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     Text(store.memoryQueryResult)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.system(size: 14))
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .frame(minHeight: 80, maxHeight: 120)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .padding(12)
+        .background(Color(NSColor.textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
+        )
+    }
+
+    private var canRunQuery: Bool {
+        !store.memoryQueryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !store.isMemoryQueryLoading
     }
 
     private func durationText(_ duration: TimeInterval) -> String {
@@ -1081,7 +1398,7 @@ struct WeekUsageStrip: View {
             HStack(alignment: .bottom, spacing: 0) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                     let isSelected = Calendar.autoupdatingCurrent.isDate(item.day, inSameDayAs: selectedDay)
-                    let barHeight = max(6, (proxy.size.height - 22) * (item.duration / maxDuration))
+                    let barHeight = max(5, (proxy.size.height - 18) * (item.duration / maxDuration))
 
                     Button {
                         onSelect(item.day)
@@ -1102,7 +1419,7 @@ struct WeekUsageStrip: View {
                 }
             }
         }
-        .frame(height: 84)
+        .frame(height: 70)
     }
 
     private func shortWeekday(_ date: Date) -> String {
@@ -1155,7 +1472,7 @@ struct HourlyUsageBars: View {
                     }
                 }
             }
-            .frame(height: 74)
+            .frame(height: 62)
 
             HStack {
                 Text("00")
@@ -1179,24 +1496,24 @@ struct DayAppListRowView: View {
     let isSelected: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             if let icon = row.icon {
                 Image(nsImage: icon)
                     .resizable()
-                    .frame(width: 22, height: 22)
+                    .frame(width: 18, height: 18)
             }
 
             Text(row.appName)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .lineLimit(1)
 
             Spacer()
 
             Text(durationCompact(row.duration))
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
         .background(isSelected ? Color.accentColor.opacity(0.20) : Color(NSColor.controlBackgroundColor).opacity(0.65))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
@@ -1216,83 +1533,450 @@ struct SettingsView: View {
     @ObservedObject var store: ActivityDashboardStore
     @State private var apiKeyDraft = ""
     @State private var userAliasesDraft = ""
+    @State private var isModelPickerPresented = false
+    @State private var modelSearchText = ""
+    @State private var activeModelPickerSlot: ModelPickerSlot = .multimodal
+
+    private enum ModelPickerSlot: String {
+        case multimodal
+        case audio
+        case text
+
+        var title: String {
+            switch self {
+            case .multimodal:
+                return "Multimodal"
+            case .audio:
+                return "Audio"
+            case .text:
+                return "Text"
+            }
+        }
+
+        var requiredInputModalities: Set<String>? {
+            switch self {
+            case .multimodal:
+                return ["image", "audio", "video"]
+            case .audio:
+                return ["audio"]
+            case .text:
+                return nil
+            }
+        }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Settings")
-                .font(.title2.weight(.bold))
+        ZStack {
+            Color(NSColor.windowBackgroundColor)
 
-            GroupBox("OpenRouter") {
-                VStack(alignment: .leading, spacing: 8) {
-                    SecureField("OPENROUTER_API_KEY", text: $apiKeyDraft)
-                        .textFieldStyle(.roundedBorder)
-
-                    HStack {
-                        Text("Usage Today: \(store.usageToday.requestCount) calls, in \(store.usageToday.inputTokens), out \(store.usageToday.outputTokens), audio \(store.usageToday.audioTokens), $\(store.usageToday.estimatedCostUSD, specifier: "%.4f")")
-                            .font(.system(size: 11))
-                        Spacer()
+            VStack(spacing: 0) {
+                HStack {
+                    Button("← Back to App") {
+                        store.isSettingsPresented = false
                     }
-                    HStack {
-                        Text("All Time: \(store.usageAllTime.requestCount) calls, in \(store.usageAllTime.inputTokens), out \(store.usageAllTime.outputTokens), audio \(store.usageAllTime.audioTokens), $\(store.usageAllTime.estimatedCostUSD, specifier: "%.4f")")
+                    .buttonStyle(.borderless)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.thinMaterial)
+
+                Divider()
+
+                Form {
+                    Section("OpenRouter") {
+                        SecureField("OPENROUTER_API_KEY", text: $apiKeyDraft)
+                        openRouterModelSelectors
+                        if let modelError = store.openRouterModelsError {
+                            Text(modelError)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.red)
+                        }
+                        Text("Default model for all modes: \(AppSettings.defaultOpenRouterModel).")
                             .font(.system(size: 11))
-                        Spacer()
+                            .foregroundStyle(.secondary)
+                        LabeledContent("Today") {
+                            Text("\(store.usageToday.requestCount) calls • in \(store.usageToday.inputTokens) • out \(store.usageToday.outputTokens) • audio \(store.usageToday.audioTokens) • $\(store.usageToday.estimatedCostUSD, specifier: "%.4f")")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        LabeledContent("All Time") {
+                            Text("\(store.usageAllTime.requestCount) calls • in \(store.usageAllTime.inputTokens) • out \(store.usageAllTime.outputTokens) • audio \(store.usageAllTime.audioTokens) • $\(store.usageAllTime.estimatedCostUSD, specifier: "%.4f")")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Section("Capture") {
+                        Toggle("Capture screenshots (activation+3s, then every 30s)", isOn: $store.settingsDraft.captureScreenshots)
+                        Toggle("Enable transcript controls", isOn: $store.settingsDraft.transcriptControlsEnabled)
+                        Toggle("Require consent before Start Transcript", isOn: $store.settingsDraft.requireTranscriptConsent)
+                        Toggle("Track Agent Context app windows", isOn: $store.settingsDraft.includeSelfAppInTracking)
+                    }
+
+                    Section("Memory") {
+                        Toggle("Enable Mem0 ingestion", isOn: $store.settingsDraft.mem0Enabled)
+                        TextField("Mem0 user id", text: $store.settingsDraft.mem0UserID)
+                        TextField("Mem0 agent id", text: $store.settingsDraft.mem0AgentID)
+                        TextField("Mem0 collection", text: $store.settingsDraft.mem0Collection)
+                        TextField("Your work/chat names (comma-separated)", text: $userAliasesDraft)
+                        Text("Use names/handles you appear under at work or in chats (for example: full name, Slack display name, username).")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Section("Update") {
+                        if store.isCheckingForUpdates {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Checking origin/main...")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else if let status = store.updateStatus {
+                            LabeledContent("Branch") {
+                                Text(status.branch)
+                                    .font(.system(size: 12, design: .monospaced))
+                            }
+                            LabeledContent("Local") {
+                                Text(shortCommit(status.localCommit))
+                                    .font(.system(size: 12, design: .monospaced))
+                            }
+                            LabeledContent("origin/main") {
+                                Text(shortCommit(status.remoteCommit))
+                                    .font(.system(size: 12, design: .monospaced))
+                            }
+                            Text(updateRelationshipText(status))
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(status.relationship == .behind ? .orange : .secondary)
+                            if status.isWorkingTreeDirty {
+                                Text("Uncommitted local changes detected. Commit or stash before updating.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.orange)
+                            }
+                        } else {
+                            Text("Check against GitHub main branch before updating.")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        HStack(spacing: 8) {
+                            Button(store.isCheckingForUpdates ? "Checking..." : "Check for Updates") {
+                                store.checkForAppUpdate()
+                            }
+                            .disabled(store.isCheckingForUpdates || store.isApplyingUpdate)
+
+                            Button(store.isApplyingUpdate ? "Updating..." : "Update, Rebuild, and Restart") {
+                                store.applyAppUpdate()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!canApplyUpdate)
+                        }
+
+                        Text("Update flow: fetch origin/main, fast-forward pull, rebuild, then relaunch.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Section("App") {
+                        Button("Quit Agent Context", role: .destructive) {
+                            store.requestQuit()
+                        }
+                        .disabled(store.isApplyingUpdate || store.isQuitFinalizing)
                     }
                 }
-            }
+                .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
+                .background(Color(NSColor.windowBackgroundColor))
 
-            GroupBox("Capture Policies") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Toggle("Capture screenshots (activation+3s, then every 30s)", isOn: $store.settingsDraft.captureScreenshots)
-                    Toggle("Enable transcript controls", isOn: $store.settingsDraft.transcriptControlsEnabled)
-                    Toggle("Require consent confirmation before Start Transcript", isOn: $store.settingsDraft.requireTranscriptConsent)
-                    Toggle("Track Agent Context app windows", isOn: $store.settingsDraft.includeSelfAppInTracking)
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let message = store.settingsMessage {
+                            Text(message)
+                                .foregroundStyle(.green)
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        if let error = store.settingsError {
+                            Text(error)
+                                .foregroundStyle(.red)
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        if let updateMessage = store.updateMessage {
+                            Text(updateMessage)
+                                .foregroundStyle(.green)
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        if let updateError = store.updateError {
+                            Text(updateError)
+                                .foregroundStyle(.red)
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                    }
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    HStack(spacing: 8) {
+                        Spacer()
+
+                        Button("Save") {
+                            store.settingsDraft.openRouterAPIKey = apiKeyDraft.nilIfEmpty
+                            store.settingsDraft.openRouterModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterModel)
+                            store.settingsDraft.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterAudioModel)
+                            store.settingsDraft.openRouterTextModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterTextModel)
+                            store.settingsDraft.userIdentityAliases = AppSettings.parseAliases(from: userAliasesDraft)
+                            store.saveSettings()
+                        }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(store.isQuitFinalizing)
+                    }
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color(NSColor.controlBackgroundColor).opacity(0.45))
             }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+        )
+        .padding(10)
+        .frame(width: 760, height: 640)
+        .background(Color(NSColor.windowBackgroundColor))
+        .onAppear {
+            apiKeyDraft = store.settingsDraft.openRouterAPIKey ?? ""
+            store.settingsDraft.openRouterModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterModel)
+            store.settingsDraft.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterAudioModel)
+            store.settingsDraft.openRouterTextModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterTextModel)
+            modelSearchText = ""
+            userAliasesDraft = AppSettings.aliasesText(store.settingsDraft.userIdentityAliases)
+        }
+    }
 
-            GroupBox("Memory") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Toggle("Enable Mem0 ingestion", isOn: $store.settingsDraft.mem0Enabled)
-                    TextField("Mem0 user id", text: $store.settingsDraft.mem0UserID)
-                    TextField("Mem0 agent id", text: $store.settingsDraft.mem0AgentID)
-                    TextField("Mem0 collection", text: $store.settingsDraft.mem0Collection)
-                    Divider()
-                    TextField("Your work/chat names (comma-separated)", text: $userAliasesDraft)
-                    Text("Use names/handles you appear under at work or in chats (for example: full name, Slack display name, username).")
-                        .font(.system(size: 11))
+    private var openRouterModelSelectors: some View {
+        VStack(spacing: 8) {
+            modelSelectorRow(label: "Multimodal model", slot: .multimodal)
+            modelSelectorRow(label: "Audio model", slot: .audio)
+            modelSelectorRow(label: "Text model", slot: .text)
+            HStack {
+                Spacer()
+                Button {
+                    store.settingsDraft.openRouterAPIKey = apiKeyDraft.nilIfEmpty
+                    store.refreshOpenRouterModels(force: true)
+                } label: {
+                    if store.isLoadingOpenRouterModels {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Label("Refresh Models", systemImage: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private func modelSelectorRow(label: String, slot: ModelPickerSlot) -> some View {
+        LabeledContent(label) {
+                Button {
+                    store.settingsDraft.openRouterAPIKey = apiKeyDraft.nilIfEmpty
+                    activeModelPickerSlot = slot
+                    modelSearchText = ""
+                    isModelPickerPresented = true
+                    store.refreshOpenRouterModels(force: store.availableOpenRouterModels.isEmpty)
+                } label: {
+                HStack(spacing: 6) {
+                    Text(currentModel(for: slot))
+                        .font(.system(size: 14))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Color(NSColor.controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: popoverBinding(for: slot), arrowEdge: .bottom) {
+                openRouterModelPopover
+            }
+        }
+    }
+
+    private var openRouterModelPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Choose \(activeModelPickerSlot.title) Model")
+                .font(.system(size: 14, weight: .semibold))
+
+            TextField("Quick search model id", text: $modelSearchText)
+                .textFieldStyle(.roundedBorder)
+
+            if store.isLoadingOpenRouterModels {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading from /models...")
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
             }
 
-            if let message = store.settingsMessage {
-                Text(message)
-                    .foregroundStyle(.green)
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            if let error = store.settingsError {
-                Text(error)
-                    .foregroundStyle(.red)
-                    .font(.system(size: 12, weight: .semibold))
-            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(filteredOpenRouterModels) { model in
+                        Button {
+                            selectModel(model.id)
+                        } label: {
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(model.id)
+                                        .font(.system(size: 14))
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    if !model.inputModalities.isEmpty {
+                                        Text(model.inputModalities.sorted().joined(separator: ", "))
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                Spacer(minLength: 4)
+                                if model.id == currentModel(for: activeModelPickerSlot) {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
 
-            HStack {
-                Spacer()
-                Button("Cancel") {
-                    store.isSettingsPresented = false
+                    if let customModelCandidate {
+                        if !filteredOpenRouterModels.isEmpty {
+                            Divider().padding(.vertical, 4)
+                        }
+                        Button {
+                            selectModel(customModelCandidate)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Text("Use \"\(customModelCandidate)\"")
+                                    .font(.system(size: 14))
+                                Spacer(minLength: 4)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if filteredOpenRouterModels.isEmpty && customModelCandidate == nil {
+                        Text("No models match your search.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 10)
+                    }
                 }
-                Button("Save") {
-                    store.settingsDraft.openRouterAPIKey = apiKeyDraft.nilIfEmpty
-                    store.settingsDraft.userIdentityAliases = AppSettings.parseAliases(from: userAliasesDraft)
-                    store.saveSettings()
-                }
-                .keyboardShortcut(.defaultAction)
             }
+            .frame(maxHeight: 260)
         }
-        .padding(16)
-        .frame(width: 760)
-        .onAppear {
-            apiKeyDraft = store.settingsDraft.openRouterAPIKey ?? ""
-            userAliasesDraft = AppSettings.aliasesText(store.settingsDraft.userIdentityAliases)
+        .frame(width: 440)
+        .padding(12)
+    }
+
+    private var canApplyUpdate: Bool {
+        guard !store.isCheckingForUpdates, !store.isApplyingUpdate else {
+            return false
         }
+
+        guard let status = store.updateStatus else {
+            return true
+        }
+
+        return status.relationship == .behind && !status.isWorkingTreeDirty && status.branch == "main"
+    }
+
+    private func shortCommit(_ value: String) -> String {
+        String(value.prefix(8))
+    }
+
+    private func updateRelationshipText(_ status: AppUpdateStatus) -> String {
+        switch status.relationship {
+        case .upToDate:
+            return "Already up to date."
+        case .behind:
+            return "Update available."
+        case .ahead:
+            return "Local branch is ahead of origin/main."
+        case .diverged:
+            return "Local branch has diverged from origin/main."
+        }
+    }
+
+    private var filteredOpenRouterModels: [OpenRouterModelOption] {
+        let needle = modelSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return store.availableOpenRouterModels }
+        return store.availableOpenRouterModels.filter { model in
+            model.id.lowercased().contains(needle)
+                || (model.name?.lowercased().contains(needle) ?? false)
+        }
+    }
+
+    private var customModelCandidate: String? {
+        guard let typed = modelSearchText.nilIfEmpty else { return nil }
+        let normalized = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        let exists = store.availableOpenRouterModels.contains { model in
+            model.id.caseInsensitiveCompare(normalized) == .orderedSame
+        }
+        return exists ? nil : normalized
+    }
+
+    private func currentModel(for slot: ModelPickerSlot) -> String {
+        switch slot {
+        case .multimodal:
+            return store.settingsDraft.openRouterModel
+        case .audio:
+            return store.settingsDraft.openRouterAudioModel
+        case .text:
+            return store.settingsDraft.openRouterTextModel
+        }
+    }
+
+    private func selectModel(_ model: String) {
+        let normalizedModel = AppSettings.normalizedOpenRouterModel(model)
+        switch activeModelPickerSlot {
+        case .multimodal:
+            store.settingsDraft.openRouterModel = normalizedModel
+        case .audio:
+            store.settingsDraft.openRouterAudioModel = normalizedModel
+        case .text:
+            store.settingsDraft.openRouterTextModel = normalizedModel
+        }
+        modelSearchText = normalizedModel
+        isModelPickerPresented = false
+    }
+
+    private func popoverBinding(for slot: ModelPickerSlot) -> Binding<Bool> {
+        Binding(
+            get: { isModelPickerPresented && activeModelPickerSlot == slot },
+            set: { presented in
+                if !presented {
+                    isModelPickerPresented = false
+                }
+            }
+        )
     }
 }
 
