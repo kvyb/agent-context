@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 final class ScreenshotCapture: @unchecked Sendable {
     private let config: TrackerConfig
     private let outputDirectory: URL
-    private let queue = DispatchQueue(label: "about-time.screenshot.capture", qos: .utility)
+    private let queue = DispatchQueue(label: "agent-context.screenshot.capture", qos: .utility)
     private static let cwebpPath: String? = {
         let candidates = [
             "/opt/homebrew/bin/cwebp",
@@ -169,7 +169,7 @@ final class ScreenshotCapture: @unchecked Sendable {
         guard let pngData = encodePNG(image: image) else { return nil }
 
         let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("about-time-webp-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("agent-context-webp-\(UUID().uuidString)", isDirectory: true)
         let inputURL = tempDirectory.appendingPathComponent("input.png")
         let outputURL = tempDirectory.appendingPathComponent("output.webp")
 

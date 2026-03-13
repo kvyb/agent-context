@@ -17,7 +17,7 @@ private func dotEnvCandidates() -> [URL] {
     let home = fileManager.homeDirectoryForCurrentUser
     var candidates = [
         cwd.appendingPathComponent(".env"),
-        home.appendingPathComponent(".about-time/.env")
+        home.appendingPathComponent(".agent-context/.env")
     ]
 
     if let resourceURL = Bundle.main.resourceURL {

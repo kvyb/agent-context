@@ -92,17 +92,17 @@ def parse_score(value: Any) -> float:
 
 
 def build_mem0_config() -> dict[str, Any]:
-    collection = os.getenv("ABOUT_TIME_MEM0_COLLECTION", "about_time_memories")
-    qdrant_path = os.getenv("ABOUT_TIME_MEM0_QDRANT_PATH", str(Path.home() / ".about-time" / "reports" / "mem0-qdrant"))
+    collection = os.getenv("AGENT_CONTEXT_MEM0_COLLECTION", "agent_context_memories")
+    qdrant_path = os.getenv("AGENT_CONTEXT_MEM0_QDRANT_PATH", str(Path.home() / ".agent-context" / "reports" / "mem0-qdrant"))
     history_db_path = os.getenv(
-        "ABOUT_TIME_MEM0_HISTORY_DB_PATH",
-        str(Path.home() / ".about-time" / "reports" / "mem0-history.sqlite"),
+        "AGENT_CONTEXT_MEM0_HISTORY_DB_PATH",
+        str(Path.home() / ".agent-context" / "reports" / "mem0-history.sqlite"),
     )
-    openrouter_base_url = os.getenv("ABOUT_TIME_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-    llm_model = os.getenv("ABOUT_TIME_MEM0_LLM_MODEL", os.getenv("ABOUT_TIME_OPENROUTER_MODEL", "google/gemini-3.1-flash-lite-preview"))
-    embed_model = os.getenv("ABOUT_TIME_MEM0_EMBED_MODEL", "openai/text-embedding-3-small")
+    openrouter_base_url = os.getenv("AGENT_CONTEXT_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    llm_model = os.getenv("AGENT_CONTEXT_MEM0_LLM_MODEL", os.getenv("AGENT_CONTEXT_OPENROUTER_MODEL", "google/gemini-3.1-flash-lite-preview"))
+    embed_model = os.getenv("AGENT_CONTEXT_MEM0_EMBED_MODEL", "openai/text-embedding-3-small")
     api_key = (
-        os.getenv("ABOUT_TIME_OPENROUTER_API_KEY")
+        os.getenv("AGENT_CONTEXT_OPENROUTER_API_KEY")
         or os.getenv("OPENROUTER_API_KEY")
         or os.getenv("OPENAI_API_KEY")
     )
@@ -111,7 +111,7 @@ def build_mem0_config() -> dict[str, Any]:
     Path(history_db_path).parent.mkdir(parents=True, exist_ok=True)
 
     return {
-        "version": os.getenv("ABOUT_TIME_MEM0_VERSION", "v1.1"),
+        "version": os.getenv("AGENT_CONTEXT_MEM0_VERSION", "v1.1"),
         "history_db_path": history_db_path,
         "vector_store": {
             "provider": "qdrant",
@@ -304,10 +304,10 @@ def main() -> int:
     start = parse_iso(payload.get("start") if isinstance(payload.get("start"), str) else None)
     end = parse_iso(payload.get("end") if isinstance(payload.get("end"), str) else None)
 
-    user_id = os.getenv("ABOUT_TIME_MEM0_USER_ID", "about-time-user")
-    agent_id = os.getenv("ABOUT_TIME_MEM0_AGENT_ID", "about-time-tracker")
+    user_id = os.getenv("AGENT_CONTEXT_MEM0_USER_ID", "agent-context-user")
+    agent_id = os.getenv("AGENT_CONTEXT_MEM0_AGENT_ID", "agent-context-tracker")
     openrouter_key = (
-        os.getenv("ABOUT_TIME_OPENROUTER_API_KEY")
+        os.getenv("AGENT_CONTEXT_OPENROUTER_API_KEY")
         or os.getenv("OPENROUTER_API_KEY")
         or os.getenv("OPENAI_API_KEY")
     )

@@ -4,10 +4,10 @@ import XCTest
 final class TrackerConfigTests: XCTestCase {
     func testDefaultsMatchVNextCadence() {
         withEnvironmentUnset([
-            "ABOUT_TIME_SCREENSHOT_AFTER_ACTIVATION_SECONDS",
-            "ABOUT_TIME_SCREENSHOT_WHILE_ACTIVE_SECONDS",
-            "ABOUT_TIME_AUDIO_CHUNK_SECONDS",
-            "ABOUT_TIME_REPORT_INTERVAL_MINUTES"
+            "AGENT_CONTEXT_SCREENSHOT_AFTER_ACTIVATION_SECONDS",
+            "AGENT_CONTEXT_SCREENSHOT_WHILE_ACTIVE_SECONDS",
+            "AGENT_CONTEXT_AUDIO_CHUNK_SECONDS",
+            "AGENT_CONTEXT_REPORT_INTERVAL_MINUTES"
         ]) {
             let config = TrackerConfig.fromEnvironment()
             XCTAssertEqual(config.screenshotActivationDelaySeconds, 3)
@@ -19,11 +19,11 @@ final class TrackerConfigTests: XCTestCase {
 
     func testClampsCadenceAndRetryValues() {
         withEnvironment([
-            "ABOUT_TIME_SCREENSHOT_AFTER_ACTIVATION_SECONDS": "0",
-            "ABOUT_TIME_SCREENSHOT_WHILE_ACTIVE_SECONDS": "3",
-            "ABOUT_TIME_AUDIO_CHUNK_SECONDS": "999",
-            "ABOUT_TIME_MAX_RETRY_ATTEMPTS": "99",
-            "ABOUT_TIME_RETRY_BASE_DELAY_SECONDS": "1"
+            "AGENT_CONTEXT_SCREENSHOT_AFTER_ACTIVATION_SECONDS": "0",
+            "AGENT_CONTEXT_SCREENSHOT_WHILE_ACTIVE_SECONDS": "3",
+            "AGENT_CONTEXT_AUDIO_CHUNK_SECONDS": "999",
+            "AGENT_CONTEXT_MAX_RETRY_ATTEMPTS": "99",
+            "AGENT_CONTEXT_RETRY_BASE_DELAY_SECONDS": "1"
         ]) {
             let config = TrackerConfig.fromEnvironment()
             XCTAssertEqual(config.screenshotActivationDelaySeconds, 1)
@@ -36,9 +36,9 @@ final class TrackerConfigTests: XCTestCase {
 
     func testOpenRouterDefaults() {
         withEnvironmentUnset([
-            "ABOUT_TIME_OPENROUTER_ENDPOINT",
-            "ABOUT_TIME_OPENROUTER_MODEL",
-            "ABOUT_TIME_OPENROUTER_REASONING_EFFORT"
+            "AGENT_CONTEXT_OPENROUTER_ENDPOINT",
+            "AGENT_CONTEXT_OPENROUTER_MODEL",
+            "AGENT_CONTEXT_OPENROUTER_REASONING_EFFORT"
         ]) {
             let config = TrackerConfig.fromEnvironment()
             XCTAssertEqual(config.openRouter.endpoint.absoluteString, "https://openrouter.ai/api/v1/chat/completions")

@@ -29,8 +29,8 @@ __pycache__/
 .venv/
 venv/
 
-# About Time runtime artifacts (when data dir is pointed inside repo)
-.about-time/
+# Agent Context runtime artifacts (when data dir is pointed inside repo)
+.agent-context/
 /screenshots/
 audio/
 reports/

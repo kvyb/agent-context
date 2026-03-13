@@ -11,7 +11,7 @@ final class AudioCaptureCoordinator: NSObject, @unchecked Sendable {
     private let outputDirectory: URL
     private let chunkSeconds: TimeInterval
     private let logger: RuntimeLog
-    private let queue = DispatchQueue(label: "about-time.audio.capture", qos: .utility)
+    private let queue = DispatchQueue(label: "agent-context.audio.capture", qos: .utility)
 
     private var stream: SCStream?
     private var writer: AVAssetWriter?

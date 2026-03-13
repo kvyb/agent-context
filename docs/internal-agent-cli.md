@@ -23,7 +23,7 @@ agent-context --query "<natural language question>" [--format text|json]
 
 ## Environment / Runtime Requirements
 
-- Agent Context data directory must be accessible (`ABOUT_TIME_HOME` or default `~/.about-time`).
+- Agent Context data directory must be accessible (`AGENT_CONTEXT_HOME` or default `~/.agent-context`).
 - Mem0 must be enabled in settings.
 - OpenRouter/OpenAI-compatible API key must be configured in settings or env.
 
