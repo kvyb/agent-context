@@ -443,6 +443,8 @@ final class ActivityDashboardStore: ObservableObject {
         settingsDraft.openRouterModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterModel)
         settingsDraft.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterAudioModel)
         settingsDraft.openRouterTextModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterTextModel)
+        settingsDraft.screenshotTTLDays = AppSettings.normalizedTTLDays(settingsDraft.screenshotTTLDays)
+        settingsDraft.audioTTLDays = AppSettings.normalizedTTLDays(settingsDraft.audioTTLDays)
         availableOpenRouterModels = withSelectedModels(availableOpenRouterModels)
         isSettingsPresented = true
         checkForAppUpdate()
@@ -454,6 +456,8 @@ final class ActivityDashboardStore: ObservableObject {
             settingsDraft.openRouterModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterModel)
             settingsDraft.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterAudioModel)
             settingsDraft.openRouterTextModel = AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterTextModel)
+            settingsDraft.screenshotTTLDays = AppSettings.normalizedTTLDays(settingsDraft.screenshotTTLDays)
+            settingsDraft.audioTTLDays = AppSettings.normalizedTTLDays(settingsDraft.audioTTLDays)
             try runtime.saveSettings(settingsDraft)
             settingsMessage = "Settings saved"
             settingsError = nil
@@ -549,6 +553,8 @@ final class ActivityDashboardStore: ObservableObject {
                     self.settingsDraft.openRouterModel = AppSettings.normalizedOpenRouterModel(self.settingsDraft.openRouterModel)
                     self.settingsDraft.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(self.settingsDraft.openRouterAudioModel)
                     self.settingsDraft.openRouterTextModel = AppSettings.normalizedOpenRouterModel(self.settingsDraft.openRouterTextModel)
+                    self.settingsDraft.screenshotTTLDays = AppSettings.normalizedTTLDays(self.settingsDraft.screenshotTTLDays)
+                    self.settingsDraft.audioTTLDays = AppSettings.normalizedTTLDays(self.settingsDraft.audioTTLDays)
                 }
             } catch {
                 await MainActor.run {
@@ -1536,6 +1542,7 @@ struct SettingsView: View {
     @State private var isModelPickerPresented = false
     @State private var modelSearchText = ""
     @State private var activeModelPickerSlot: ModelPickerSlot = .multimodal
+    private let ttlOptions = [0, 1, 3, 7, 14, 30, 60, 90, 180, 365, 730, 3650]
 
     private enum ModelPickerSlot: String {
         case multimodal
@@ -1609,9 +1616,32 @@ struct SettingsView: View {
 
                     Section("Capture") {
                         Toggle("Capture screenshots (activation+3s, then every 30s)", isOn: $store.settingsDraft.captureScreenshots)
+                        LabeledContent("Screenshot retention") {
+                            Picker("Screenshot retention", selection: $store.settingsDraft.screenshotTTLDays) {
+                                ForEach(ttlOptions, id: \.self) { days in
+                                    Text(ttlLabel(days))
+                                        .tag(days)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 180)
+                        }
+                        LabeledContent("Audio retention") {
+                            Picker("Audio retention", selection: $store.settingsDraft.audioTTLDays) {
+                                ForEach(ttlOptions, id: \.self) { days in
+                                    Text(ttlLabel(days))
+                                        .tag(days)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 180)
+                        }
                         Toggle("Enable transcript controls", isOn: $store.settingsDraft.transcriptControlsEnabled)
                         Toggle("Require consent before Start Transcript", isOn: $store.settingsDraft.requireTranscriptConsent)
                         Toggle("Track Agent Context app windows", isOn: $store.settingsDraft.includeSelfAppInTracking)
+                        Text("Retention TTL removes screenshot/audio files and matching evidence rows older than the selected age.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
                     }
 
                     Section("Memory") {
@@ -1727,6 +1757,8 @@ struct SettingsView: View {
                             store.settingsDraft.openRouterModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterModel)
                             store.settingsDraft.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterAudioModel)
                             store.settingsDraft.openRouterTextModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterTextModel)
+                            store.settingsDraft.screenshotTTLDays = AppSettings.normalizedTTLDays(store.settingsDraft.screenshotTTLDays)
+                            store.settingsDraft.audioTTLDays = AppSettings.normalizedTTLDays(store.settingsDraft.audioTTLDays)
                             store.settingsDraft.userIdentityAliases = AppSettings.parseAliases(from: userAliasesDraft)
                             store.saveSettings()
                         }
@@ -1752,6 +1784,8 @@ struct SettingsView: View {
             store.settingsDraft.openRouterModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterModel)
             store.settingsDraft.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterAudioModel)
             store.settingsDraft.openRouterTextModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterTextModel)
+            store.settingsDraft.screenshotTTLDays = AppSettings.normalizedTTLDays(store.settingsDraft.screenshotTTLDays)
+            store.settingsDraft.audioTTLDays = AppSettings.normalizedTTLDays(store.settingsDraft.audioTTLDays)
             modelSearchText = ""
             userAliasesDraft = AppSettings.aliasesText(store.settingsDraft.userIdentityAliases)
         }
@@ -1923,6 +1957,16 @@ struct SettingsView: View {
         case .diverged:
             return "Local branch has diverged from origin/main."
         }
+    }
+
+    private func ttlLabel(_ days: Int) -> String {
+        if days == 0 {
+            return "Keep forever"
+        }
+        if days == 1 {
+            return "1 day"
+        }
+        return "\(days) days"
     }
 
     private var filteredOpenRouterModels: [OpenRouterModelOption] {

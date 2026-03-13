@@ -88,6 +88,7 @@ Primary data stays local:
 - screenshots/audio under `~/.agent-context/`
 - SQLite activity DB at `~/.agent-context/reports/activity.sqlite`
 - local Mem0 history DB + local vector store path
+- screenshot/audio retention TTL is configurable in Settings (default 3 days each)
 
 Inference is provider-flexible as long as it is OpenAI-compatible API format.
 This setup is commonly used with OpenRouter under a no-retention policy configured at the account/provider level.

@@ -9,6 +9,8 @@ struct AppSettings: Codable, Sendable {
     // Text model used for synthesis, planning, and memory answers.
     var openRouterTextModel: String
     var captureScreenshots: Bool
+    var screenshotTTLDays: Int
+    var audioTTLDays: Int
     var transcriptControlsEnabled: Bool
     var requireTranscriptConsent: Bool
     var includeSelfAppInTracking: Bool
@@ -21,6 +23,7 @@ struct AppSettings: Codable, Sendable {
     var openRouterRefererHeader: String?
 
     static let defaultOpenRouterModel = "google/gemini-3.1-flash-lite-preview"
+    static let defaultArtifactTTLDays = 3
 
     static let `default` = AppSettings(
         openRouterAPIKey: nil,
@@ -28,6 +31,8 @@ struct AppSettings: Codable, Sendable {
         openRouterAudioModel: AppSettings.defaultOpenRouterModel,
         openRouterTextModel: AppSettings.defaultOpenRouterModel,
         captureScreenshots: true,
+        screenshotTTLDays: AppSettings.defaultArtifactTTLDays,
+        audioTTLDays: AppSettings.defaultArtifactTTLDays,
         transcriptControlsEnabled: true,
         requireTranscriptConsent: true,
         includeSelfAppInTracking: false,
@@ -46,6 +51,8 @@ struct AppSettings: Codable, Sendable {
         openRouterAudioModel: String,
         openRouterTextModel: String,
         captureScreenshots: Bool,
+        screenshotTTLDays: Int,
+        audioTTLDays: Int,
         transcriptControlsEnabled: Bool,
         requireTranscriptConsent: Bool,
         includeSelfAppInTracking: Bool,
@@ -62,6 +69,8 @@ struct AppSettings: Codable, Sendable {
         self.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(openRouterAudioModel)
         self.openRouterTextModel = AppSettings.normalizedOpenRouterModel(openRouterTextModel)
         self.captureScreenshots = captureScreenshots
+        self.screenshotTTLDays = AppSettings.normalizedTTLDays(screenshotTTLDays)
+        self.audioTTLDays = AppSettings.normalizedTTLDays(audioTTLDays)
         self.transcriptControlsEnabled = transcriptControlsEnabled
         self.requireTranscriptConsent = requireTranscriptConsent
         self.includeSelfAppInTracking = includeSelfAppInTracking
@@ -80,6 +89,8 @@ struct AppSettings: Codable, Sendable {
         case openRouterAudioModel
         case openRouterTextModel
         case captureScreenshots
+        case screenshotTTLDays
+        case audioTTLDays
         case transcriptControlsEnabled
         case requireTranscriptConsent
         case includeSelfAppInTracking
@@ -111,6 +122,12 @@ struct AppSettings: Codable, Sendable {
             ?? legacyOrDefaultModel
         )
         captureScreenshots = try container.decodeIfPresent(Bool.self, forKey: .captureScreenshots) ?? defaults.captureScreenshots
+        screenshotTTLDays = AppSettings.normalizedTTLDays(
+            try container.decodeIfPresent(Int.self, forKey: .screenshotTTLDays) ?? defaults.screenshotTTLDays
+        )
+        audioTTLDays = AppSettings.normalizedTTLDays(
+            try container.decodeIfPresent(Int.self, forKey: .audioTTLDays) ?? defaults.audioTTLDays
+        )
         transcriptControlsEnabled = try container.decodeIfPresent(Bool.self, forKey: .transcriptControlsEnabled) ?? defaults.transcriptControlsEnabled
         requireTranscriptConsent = try container.decodeIfPresent(Bool.self, forKey: .requireTranscriptConsent) ?? defaults.requireTranscriptConsent
         includeSelfAppInTracking = try container.decodeIfPresent(Bool.self, forKey: .includeSelfAppInTracking)
@@ -134,6 +151,8 @@ struct AppSettings: Codable, Sendable {
         try container.encode(AppSettings.normalizedOpenRouterModel(openRouterAudioModel), forKey: .openRouterAudioModel)
         try container.encode(AppSettings.normalizedOpenRouterModel(openRouterTextModel), forKey: .openRouterTextModel)
         try container.encode(captureScreenshots, forKey: .captureScreenshots)
+        try container.encode(AppSettings.normalizedTTLDays(screenshotTTLDays), forKey: .screenshotTTLDays)
+        try container.encode(AppSettings.normalizedTTLDays(audioTTLDays), forKey: .audioTTLDays)
         try container.encode(transcriptControlsEnabled, forKey: .transcriptControlsEnabled)
         try container.encode(requireTranscriptConsent, forKey: .requireTranscriptConsent)
         try container.encode(includeSelfAppInTracking, forKey: .includeSelfAppInTracking)
@@ -148,6 +167,11 @@ struct AppSettings: Codable, Sendable {
 
     static func normalizedOpenRouterModel(_ value: String?) -> String {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? defaultOpenRouterModel
+    }
+
+    static func normalizedTTLDays(_ value: Int?) -> Int {
+        let raw = value ?? defaultArtifactTTLDays
+        return min(3650, max(0, raw))
     }
 
     static func parseAliases(from raw: String?) -> [String] {
@@ -205,6 +229,12 @@ enum AppSettingsStore {
             defaults.openRouterTextModel = AppSettings.normalizedOpenRouterModel(
                 env["AGENT_CONTEXT_OPENROUTER_TEXT_MODEL"] ?? envDefaultModel
             )
+            defaults.screenshotTTLDays = AppSettings.normalizedTTLDays(
+                env["AGENT_CONTEXT_SCREENSHOT_TTL_DAYS"].flatMap(Int.init)
+            )
+            defaults.audioTTLDays = AppSettings.normalizedTTLDays(
+                env["AGENT_CONTEXT_AUDIO_TTL_DAYS"].flatMap(Int.init)
+            )
             defaults.userIdentityAliases = AppSettings.parseAliases(from: env["AGENT_CONTEXT_USER_ALIASES"])
             return defaults
         }
@@ -229,6 +259,8 @@ enum AppSettingsStore {
             ?? env["AGENT_CONTEXT_OPENROUTER_TEXT_MODEL"]
             ?? settings.openRouterModel
         )
+        settings.screenshotTTLDays = AppSettings.normalizedTTLDays(settings.screenshotTTLDays)
+        settings.audioTTLDays = AppSettings.normalizedTTLDays(settings.audioTTLDays)
         settings.userIdentityAliases = AppSettings.normalizedAliases(settings.userIdentityAliases)
         if settings.userIdentityAliases.isEmpty {
             settings.userIdentityAliases = AppSettings.parseAliases(from: env["AGENT_CONTEXT_USER_ALIASES"])
@@ -245,6 +277,8 @@ enum AppSettingsStore {
         settingsToPersist.openRouterModel = AppSettings.normalizedOpenRouterModel(settings.openRouterModel)
         settingsToPersist.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(settings.openRouterAudioModel)
         settingsToPersist.openRouterTextModel = AppSettings.normalizedOpenRouterModel(settings.openRouterTextModel)
+        settingsToPersist.screenshotTTLDays = AppSettings.normalizedTTLDays(settings.screenshotTTLDays)
+        settingsToPersist.audioTTLDays = AppSettings.normalizedTTLDays(settings.audioTTLDays)
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

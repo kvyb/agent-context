@@ -88,9 +88,12 @@ final class TrackerRuntime: @unchecked Sendable {
     private let settingsBox: SettingsBox
     private let database: SQLiteStore
     private let logger: RuntimeLog
+    private let retentionManager: ArtifactRetentionManager
     private let trackerAgent: TrackerAgent
     private let memoryQueryService: MemoryQueryService
     private let calendar: Calendar
+    private let retentionQueue = DispatchQueue(label: "agent-context.retention", qos: .utility)
+    private var retentionTimer: DispatchSourceTimer?
 
     private let stateLock = NSLock()
     private var transcriptStartedAt: Date?
@@ -113,6 +116,7 @@ final class TrackerRuntime: @unchecked Sendable {
 
         logger = RuntimeLog(baseDirectory: config.baseDirectory)
         database = try SQLiteStore(databaseURL: config.databaseURL)
+        retentionManager = ArtifactRetentionManager(database: database, logger: logger)
 
         let mem0Ingestor = Mem0Ingestor(
             scriptURL: config.mem0ScriptURL,
@@ -183,6 +187,13 @@ final class TrackerRuntime: @unchecked Sendable {
             self.stateLock.unlock()
             self.onTranscriptStateChanged?(running, startedAt)
         }
+
+        scheduleRetentionSweeps()
+    }
+
+    deinit {
+        retentionTimer?.cancel()
+        retentionTimer = nil
     }
 
     var isRecording: Bool {
@@ -223,6 +234,7 @@ final class TrackerRuntime: @unchecked Sendable {
             "retry journal: \(config.retryJournalURL.path)",
             "screenshots: activation=\(Int(config.screenshotActivationDelaySeconds))s active=\(Int(config.screenshotWhileActiveSeconds))s",
             "audio transcript chunking: \(Int(config.audioChunkSeconds))s manual controls only",
+            "retention TTL days: screenshots=\(settings.screenshotTTLDays == 0 ? "forever" : "\(settings.screenshotTTLDays)") audio=\(settings.audioTTLDays == 0 ? "forever" : "\(settings.audioTTLDays)")",
             "openrouter endpoint: \(config.openRouter.endpoint.absoluteString)",
             "openrouter models: multimodal=\(settings.openRouterModel) audio=\(settings.openRouterAudioModel) text=\(settings.openRouterTextModel) reasoning=\(config.openRouter.reasoningEffort)",
             "mem0 enabled: \(settings.mem0Enabled) ingest_script=\(config.mem0ScriptURL.path)",
@@ -238,6 +250,7 @@ final class TrackerRuntime: @unchecked Sendable {
     func saveSettings(_ settings: AppSettings) throws {
         try AppSettingsStore.save(settings, baseDirectory: config.baseDirectory)
         settingsBox.update(settings)
+        runRetentionSweep(reason: "settings-save")
     }
 
     func checkForUpdatesAgainstMain() throws -> AppUpdateStatus {
@@ -731,6 +744,26 @@ final class TrackerRuntime: @unchecked Sendable {
 
     private func shortCommit(_ value: String) -> String {
         String(value.prefix(8))
+    }
+
+    private func scheduleRetentionSweeps() {
+        runRetentionSweep(reason: "startup")
+
+        let timer = DispatchSource.makeTimerSource(queue: retentionQueue)
+        timer.schedule(deadline: .now() + 300, repeating: 3_600)
+        timer.setEventHandler { [weak self] in
+            self?.runRetentionSweep(reason: "periodic")
+        }
+        timer.resume()
+        retentionTimer = timer
+    }
+
+    private func runRetentionSweep(reason: String) {
+        let settings = settingsBox.get()
+        let retentionManager = retentionManager
+        Task.detached(priority: .utility) {
+            await retentionManager.runSweep(settings: settings, reason: reason)
+        }
     }
 }
 

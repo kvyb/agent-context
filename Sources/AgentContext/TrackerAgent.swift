@@ -506,7 +506,15 @@ final class TrackerAgent: @unchecked Sendable {
             Task {
                 let due = await self.retryJournal.dueItems(now: Date())
                 for item in due {
-                    self.enqueueArtifactAnalysis(metadata: item.metadata, priorAttempts: item.attempts)
+                    do {
+                        if let metadata = try await self.database.fetchArtifactMetadata(id: item.id) {
+                            self.enqueueArtifactAnalysis(metadata: metadata, priorAttempts: item.attempts)
+                        } else {
+                            await self.retryJournal.remove(id: item.id)
+                        }
+                    } catch {
+                        self.logger.error("Retry lookup failed for artifact \(item.id): \(error.localizedDescription)")
+                    }
                 }
             }
         }

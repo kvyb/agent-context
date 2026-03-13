@@ -23,6 +23,12 @@ struct MemoryRecord: Sendable {
     let entities: [String]
 }
 
+struct PurgedArtifactBatch: Sendable {
+    let kind: ArtifactKind
+    let deletedRows: Int
+    let deletedPaths: [String]
+}
+
 actor SQLiteStore {
     private let databaseURL: URL
     private var db: OpaquePointer?
@@ -544,6 +550,43 @@ actor SQLiteStore {
             intervalID: string(statement, column: 12),
             captureReason: string(statement, column: 13) ?? "unknown",
             sequenceInInterval: Int(sqlite3_column_int(statement, 14))
+        )
+    }
+
+    func purgeEvidence(kind: ArtifactKind, capturedBefore cutoff: Date, limit: Int) throws -> PurgedArtifactBatch {
+        let candidates = try listEvidencePurgeCandidates(
+            kind: kind,
+            capturedBefore: cutoff,
+            limit: min(2_000, max(1, limit))
+        )
+        guard !candidates.isEmpty else {
+            return PurgedArtifactBatch(kind: kind, deletedRows: 0, deletedPaths: [])
+        }
+
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            let deleteSQL = "DELETE FROM evidence WHERE id = ?;"
+            var deleteStatement: OpaquePointer?
+            try prepare(deleteSQL, statement: &deleteStatement)
+            defer { sqlite3_finalize(deleteStatement) }
+
+            for candidate in candidates {
+                bindText(deleteStatement, index: 1, value: candidate.id)
+                try step(deleteStatement)
+                sqlite3_reset(deleteStatement)
+                sqlite3_clear_bindings(deleteStatement)
+            }
+
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+
+        return PurgedArtifactBatch(
+            kind: kind,
+            deletedRows: candidates.count,
+            deletedPaths: candidates.map(\.path)
         )
     }
 
@@ -1572,11 +1615,50 @@ actor SQLiteStore {
         return try? jsonDecoder.decode(ArtifactAnalysis.self, from: data)
     }
 
+    private func listEvidencePurgeCandidates(
+        kind: ArtifactKind,
+        capturedBefore cutoff: Date,
+        limit: Int
+    ) throws -> [EvidencePurgeCandidate] {
+        let sql = """
+            SELECT id, artifact_path
+              FROM evidence
+             WHERE kind = ? AND captured_at < ?
+             ORDER BY captured_at ASC
+             LIMIT ?;
+        """
+
+        var statement: OpaquePointer?
+        try prepare(sql, statement: &statement)
+        defer { sqlite3_finalize(statement) }
+
+        bindText(statement, index: 1, value: kind.rawValue)
+        sqlite3_bind_double(statement, 2, cutoff.timeIntervalSince1970)
+        sqlite3_bind_int(statement, 3, Int32(max(1, limit)))
+
+        var output: [EvidencePurgeCandidate] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let id = string(statement, column: 0),
+                  let path = string(statement, column: 1)
+            else {
+                continue
+            }
+            output.append(EvidencePurgeCandidate(id: id, path: path))
+        }
+
+        return output
+    }
+
     private func lastErrorMessage() -> String {
         guard let db else { return "SQLite database unavailable" }
         guard let message = sqlite3_errmsg(db) else { return "Unknown SQLite error" }
         return String(cString: message)
     }
+}
+
+private struct EvidencePurgeCandidate: Sendable {
+    let id: String
+    let path: String
 }
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

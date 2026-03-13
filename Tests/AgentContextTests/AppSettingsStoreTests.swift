@@ -12,6 +12,8 @@ final class AppSettingsStoreTests: XCTestCase {
         settings.openRouterAudioModel = "openai/gpt-4o-mini-transcribe"
         settings.openRouterTextModel = "openai/gpt-5-mini"
         settings.captureScreenshots = false
+        settings.screenshotTTLDays = 45
+        settings.audioTTLDays = 14
 
         try AppSettingsStore.save(settings, baseDirectory: directory)
 
@@ -21,6 +23,8 @@ final class AppSettingsStoreTests: XCTestCase {
         XCTAssertEqual(loaded.openRouterAudioModel, "openai/gpt-4o-mini-transcribe")
         XCTAssertEqual(loaded.openRouterTextModel, "openai/gpt-5-mini")
         XCTAssertFalse(loaded.captureScreenshots)
+        XCTAssertEqual(loaded.screenshotTTLDays, 45)
+        XCTAssertEqual(loaded.audioTTLDays, 14)
     }
 
     func testResolvedOpenRouterKeyPrefersSettingsThenEnvFallback() {
@@ -80,6 +84,27 @@ final class AppSettingsStoreTests: XCTestCase {
         XCTAssertEqual(loaded.openRouterModel, "google/gemini-3.1-flash-lite-preview")
         XCTAssertEqual(loaded.openRouterAudioModel, "openai/gpt-4o-mini-transcribe")
         XCTAssertEqual(loaded.openRouterTextModel, "openai/gpt-5-mini")
+    }
+
+    func testLoadUsesTTLEnvFallbackWhenSettingsMissing() {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let loaded = AppSettingsStore.load(
+            baseDirectory: directory,
+            env: [
+                "AGENT_CONTEXT_SCREENSHOT_TTL_DAYS": "21",
+                "AGENT_CONTEXT_AUDIO_TTL_DAYS": "7"
+            ]
+        )
+        XCTAssertEqual(loaded.screenshotTTLDays, 21)
+        XCTAssertEqual(loaded.audioTTLDays, 7)
+    }
+
+    func testTTLNormalizationClampsNegativeValues() {
+        XCTAssertEqual(AppSettings.normalizedTTLDays(-5), 0)
+        XCTAssertEqual(AppSettings.normalizedTTLDays(0), 0)
+        XCTAssertEqual(AppSettings.normalizedTTLDays(30), 30)
     }
 
     private func temporaryDirectory() -> URL {
