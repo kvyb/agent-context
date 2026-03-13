@@ -2,6 +2,12 @@ import Foundation
 
 struct AppSettings: Codable, Sendable {
     var openRouterAPIKey: String?
+    // Multimodal model used for screenshot/video-style evidence extraction.
+    var openRouterModel: String
+    // Audio-capable model used for transcript chunk analysis.
+    var openRouterAudioModel: String
+    // Text model used for synthesis, planning, and memory answers.
+    var openRouterTextModel: String
     var captureScreenshots: Bool
     var transcriptControlsEnabled: Bool
     var requireTranscriptConsent: Bool
@@ -14,23 +20,31 @@ struct AppSettings: Codable, Sendable {
     var openRouterAppNameHeader: String?
     var openRouterRefererHeader: String?
 
+    static let defaultOpenRouterModel = "google/gemini-3.1-flash-lite-preview"
+
     static let `default` = AppSettings(
         openRouterAPIKey: nil,
+        openRouterModel: AppSettings.defaultOpenRouterModel,
+        openRouterAudioModel: AppSettings.defaultOpenRouterModel,
+        openRouterTextModel: AppSettings.defaultOpenRouterModel,
         captureScreenshots: true,
         transcriptControlsEnabled: true,
         requireTranscriptConsent: true,
         includeSelfAppInTracking: false,
         userIdentityAliases: [],
         mem0Enabled: true,
-        mem0UserID: "about-time-user",
-        mem0AgentID: "about-time-tracker",
-        mem0Collection: "about_time_memories",
+        mem0UserID: "agent-context-user",
+        mem0AgentID: "agent-context-tracker",
+        mem0Collection: "agent_context_memories",
         openRouterAppNameHeader: "Agent Context",
         openRouterRefererHeader: nil
     )
 
     init(
         openRouterAPIKey: String?,
+        openRouterModel: String,
+        openRouterAudioModel: String,
+        openRouterTextModel: String,
         captureScreenshots: Bool,
         transcriptControlsEnabled: Bool,
         requireTranscriptConsent: Bool,
@@ -44,6 +58,9 @@ struct AppSettings: Codable, Sendable {
         openRouterRefererHeader: String?
     ) {
         self.openRouterAPIKey = openRouterAPIKey
+        self.openRouterModel = AppSettings.normalizedOpenRouterModel(openRouterModel)
+        self.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(openRouterAudioModel)
+        self.openRouterTextModel = AppSettings.normalizedOpenRouterModel(openRouterTextModel)
         self.captureScreenshots = captureScreenshots
         self.transcriptControlsEnabled = transcriptControlsEnabled
         self.requireTranscriptConsent = requireTranscriptConsent
@@ -59,13 +76,14 @@ struct AppSettings: Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case openRouterAPIKey
+        case openRouterModel
+        case openRouterAudioModel
+        case openRouterTextModel
         case captureScreenshots
         case transcriptControlsEnabled
         case requireTranscriptConsent
         case includeSelfAppInTracking
-        case includeAboutTimeAppInTracking
         case userIdentityAliases
-        case userAliases
         case mem0Enabled
         case mem0UserID
         case mem0AgentID
@@ -79,15 +97,26 @@ struct AppSettings: Codable, Sendable {
         let defaults = AppSettings.default
 
         openRouterAPIKey = try container.decodeIfPresent(String.self, forKey: .openRouterAPIKey)
+        let legacyOrDefaultModel = AppSettings.normalizedOpenRouterModel(
+            try container.decodeIfPresent(String.self, forKey: .openRouterModel)
+            ?? defaults.openRouterModel
+        )
+        openRouterModel = legacyOrDefaultModel
+        openRouterAudioModel = AppSettings.normalizedOpenRouterModel(
+            try container.decodeIfPresent(String.self, forKey: .openRouterAudioModel)
+            ?? legacyOrDefaultModel
+        )
+        openRouterTextModel = AppSettings.normalizedOpenRouterModel(
+            try container.decodeIfPresent(String.self, forKey: .openRouterTextModel)
+            ?? legacyOrDefaultModel
+        )
         captureScreenshots = try container.decodeIfPresent(Bool.self, forKey: .captureScreenshots) ?? defaults.captureScreenshots
         transcriptControlsEnabled = try container.decodeIfPresent(Bool.self, forKey: .transcriptControlsEnabled) ?? defaults.transcriptControlsEnabled
         requireTranscriptConsent = try container.decodeIfPresent(Bool.self, forKey: .requireTranscriptConsent) ?? defaults.requireTranscriptConsent
         includeSelfAppInTracking = try container.decodeIfPresent(Bool.self, forKey: .includeSelfAppInTracking)
-            ?? container.decodeIfPresent(Bool.self, forKey: .includeAboutTimeAppInTracking)
             ?? defaults.includeSelfAppInTracking
         userIdentityAliases = AppSettings.normalizedAliases(
             try container.decodeIfPresent([String].self, forKey: .userIdentityAliases)
-            ?? container.decodeIfPresent([String].self, forKey: .userAliases)
             ?? defaults.userIdentityAliases
         )
         mem0Enabled = try container.decodeIfPresent(Bool.self, forKey: .mem0Enabled) ?? defaults.mem0Enabled
@@ -101,6 +130,9 @@ struct AppSettings: Codable, Sendable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(openRouterAPIKey, forKey: .openRouterAPIKey)
+        try container.encode(AppSettings.normalizedOpenRouterModel(openRouterModel), forKey: .openRouterModel)
+        try container.encode(AppSettings.normalizedOpenRouterModel(openRouterAudioModel), forKey: .openRouterAudioModel)
+        try container.encode(AppSettings.normalizedOpenRouterModel(openRouterTextModel), forKey: .openRouterTextModel)
         try container.encode(captureScreenshots, forKey: .captureScreenshots)
         try container.encode(transcriptControlsEnabled, forKey: .transcriptControlsEnabled)
         try container.encode(requireTranscriptConsent, forKey: .requireTranscriptConsent)
@@ -112,6 +144,10 @@ struct AppSettings: Codable, Sendable {
         try container.encode(mem0Collection, forKey: .mem0Collection)
         try container.encodeIfPresent(openRouterAppNameHeader, forKey: .openRouterAppNameHeader)
         try container.encodeIfPresent(openRouterRefererHeader, forKey: .openRouterRefererHeader)
+    }
+
+    static func normalizedOpenRouterModel(_ value: String?) -> String {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? defaultOpenRouterModel
     }
 
     static func parseAliases(from raw: String?) -> [String] {
@@ -156,20 +192,46 @@ enum AppSettingsStore {
             let decoded = try? decoder.decode(AppSettings.self, from: data)
         else {
             var defaults = AppSettings.default
-            if let envKey = normalized(env["OPENROUTER_API_KEY"] ?? env["ABOUT_TIME_OPENROUTER_API_KEY"]) {
+            if let envKey = normalized(env["OPENROUTER_API_KEY"] ?? env["AGENT_CONTEXT_OPENROUTER_API_KEY"]) {
                 defaults.openRouterAPIKey = envKey
             }
-            defaults.userIdentityAliases = AppSettings.parseAliases(from: env["ABOUT_TIME_USER_ALIASES"])
+            let envDefaultModel = AppSettings.normalizedOpenRouterModel(env["AGENT_CONTEXT_OPENROUTER_MODEL"])
+            defaults.openRouterModel = AppSettings.normalizedOpenRouterModel(
+                env["AGENT_CONTEXT_OPENROUTER_MULTIMODAL_MODEL"] ?? envDefaultModel
+            )
+            defaults.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(
+                env["AGENT_CONTEXT_OPENROUTER_AUDIO_MODEL"] ?? envDefaultModel
+            )
+            defaults.openRouterTextModel = AppSettings.normalizedOpenRouterModel(
+                env["AGENT_CONTEXT_OPENROUTER_TEXT_MODEL"] ?? envDefaultModel
+            )
+            defaults.userIdentityAliases = AppSettings.parseAliases(from: env["AGENT_CONTEXT_USER_ALIASES"])
             return defaults
         }
 
         var settings = decoded
         if settings.openRouterAPIKey?.isEmpty != false {
-            settings.openRouterAPIKey = normalized(env["OPENROUTER_API_KEY"] ?? env["ABOUT_TIME_OPENROUTER_API_KEY"])
+            settings.openRouterAPIKey = normalized(env["OPENROUTER_API_KEY"] ?? env["AGENT_CONTEXT_OPENROUTER_API_KEY"])
         }
+        let envDefaultModel = AppSettings.normalizedOpenRouterModel(env["AGENT_CONTEXT_OPENROUTER_MODEL"])
+        settings.openRouterModel = AppSettings.normalizedOpenRouterModel(
+            settings.openRouterModel.nilIfEmpty
+            ?? env["AGENT_CONTEXT_OPENROUTER_MULTIMODAL_MODEL"]
+            ?? envDefaultModel
+        )
+        settings.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(
+            settings.openRouterAudioModel.nilIfEmpty
+            ?? env["AGENT_CONTEXT_OPENROUTER_AUDIO_MODEL"]
+            ?? settings.openRouterModel
+        )
+        settings.openRouterTextModel = AppSettings.normalizedOpenRouterModel(
+            settings.openRouterTextModel.nilIfEmpty
+            ?? env["AGENT_CONTEXT_OPENROUTER_TEXT_MODEL"]
+            ?? settings.openRouterModel
+        )
         settings.userIdentityAliases = AppSettings.normalizedAliases(settings.userIdentityAliases)
         if settings.userIdentityAliases.isEmpty {
-            settings.userIdentityAliases = AppSettings.parseAliases(from: env["ABOUT_TIME_USER_ALIASES"])
+            settings.userIdentityAliases = AppSettings.parseAliases(from: env["AGENT_CONTEXT_USER_ALIASES"])
         }
         return settings
     }
@@ -180,6 +242,9 @@ enum AppSettingsStore {
 
         var settingsToPersist = settings
         settingsToPersist.openRouterAPIKey = normalized(settings.openRouterAPIKey)
+        settingsToPersist.openRouterModel = AppSettings.normalizedOpenRouterModel(settings.openRouterModel)
+        settingsToPersist.openRouterAudioModel = AppSettings.normalizedOpenRouterModel(settings.openRouterAudioModel)
+        settingsToPersist.openRouterTextModel = AppSettings.normalizedOpenRouterModel(settings.openRouterTextModel)
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -190,7 +255,7 @@ enum AppSettingsStore {
 
     static func resolvedOpenRouterKey(settings: AppSettings, env: [String: String]) -> String? {
         normalized(settings.openRouterAPIKey)
-            ?? normalized(env["OPENROUTER_API_KEY"] ?? env["ABOUT_TIME_OPENROUTER_API_KEY"])
+            ?? normalized(env["OPENROUTER_API_KEY"] ?? env["AGENT_CONTEXT_OPENROUTER_API_KEY"])
     }
 
     private static func normalized(_ value: String?) -> String? {

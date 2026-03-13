@@ -18,8 +18,8 @@ final class TrackerAgent: @unchecked Sendable {
     private let retryJournal: RetryJournal
     private let hourlyReporter: HourlyActivityReporter
 
-    private let stateQueue = DispatchQueue(label: "about-time.tracker.state")
-    private let analysisQueue = DispatchQueue(label: "about-time.tracker.analysis", qos: .utility)
+    private let stateQueue = DispatchQueue(label: "agent-context.tracker.state")
+    private let analysisQueue = DispatchQueue(label: "agent-context.tracker.analysis", qos: .utility)
 
     private var isRunning = false
     private var trackingSuppressed = false
@@ -457,7 +457,7 @@ final class TrackerAgent: @unchecked Sendable {
                         evidenceID: metadata.id,
                         analysis: analysis,
                         usage: callResult.usage,
-                        model: config.openRouter.model
+                        model: callResult.usage.model
                     )
                     await retryJournal.remove(id: metadata.id)
                 } catch {

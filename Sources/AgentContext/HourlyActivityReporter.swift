@@ -31,7 +31,7 @@ final class HourlyActivityReporter: @unchecked Sendable {
     private let apiKeyProvider: () -> String?
     private let mem0Ingestor: Mem0Ingestor
 
-    private let queue = DispatchQueue(label: "about-time.hourly.reporter", qos: .utility)
+    private let queue = DispatchQueue(label: "agent-context.hourly.reporter", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var running = false
     private var drainingSemaphore: DispatchSemaphore?
@@ -275,7 +275,7 @@ final class HourlyActivityReporter: @unchecked Sendable {
         for entry in prepared {
             let summary = entry.summary
             let usageSnapshot = entry.usage
-            let model = self.config.openRouter.model
+            let model = usageSnapshot?.model.nilIfEmpty ?? self.config.openRouter.model
             try wait {
                 try await self.database.saveIntervalSummary(summary, usage: usageSnapshot, model: model)
             }
@@ -448,7 +448,7 @@ final class HourlyActivityReporter: @unchecked Sendable {
         }
 
         let usageSnapshot = usage
-        let model = self.config.openRouter.model
+        let model = usageSnapshot?.model.nilIfEmpty ?? self.config.openRouter.model
         try wait { [self, summary, usageSnapshot, model] in
             try await self.database.saveHourSummary(summary, usage: usageSnapshot, model: model)
         }

@@ -1,7 +1,7 @@
 import Foundation
 
 final class RuntimeLog: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "about-time.runtime-log")
+    private let queue = DispatchQueue(label: "agent-context.runtime-log")
     private let fileURL: URL
 
     init(baseDirectory: URL) {
@@ -140,25 +140,28 @@ final class Mem0Ingestor: @unchecked Sendable {
         process.arguments = [scriptURL.path]
 
         var env = ProcessInfo.processInfo.environment
-        env["ABOUT_TIME_MEM0_USER_ID"] = settings.mem0UserID
-        env["ABOUT_TIME_MEM0_AGENT_ID"] = settings.mem0AgentID
-        env["ABOUT_TIME_MEM0_COLLECTION"] = settings.mem0Collection
-        env["ABOUT_TIME_MEM0_HISTORY_DB_PATH"] = baseDirectory
+        env["AGENT_CONTEXT_MEM0_USER_ID"] = settings.mem0UserID
+        env["AGENT_CONTEXT_MEM0_AGENT_ID"] = settings.mem0AgentID
+        env["AGENT_CONTEXT_MEM0_COLLECTION"] = settings.mem0Collection
+        env["AGENT_CONTEXT_MEM0_HISTORY_DB_PATH"] = baseDirectory
             .appendingPathComponent("reports/mem0-history.sqlite").path
-        env["ABOUT_TIME_MEM0_QDRANT_PATH"] = baseDirectory
+        env["AGENT_CONTEXT_MEM0_QDRANT_PATH"] = baseDirectory
             .appendingPathComponent("reports/mem0-qdrant").path
-        env["ABOUT_TIME_OPENROUTER_BASE_URL"] = env["ABOUT_TIME_OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1"
+        env["AGENT_CONTEXT_OPENROUTER_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1"
         if let key = normalized(settings.openRouterAPIKey) {
-            env["ABOUT_TIME_OPENROUTER_API_KEY"] = key
+            env["AGENT_CONTEXT_OPENROUTER_API_KEY"] = key
             env["OPENROUTER_API_KEY"] = key
             env["OPENAI_API_KEY"] = key
         }
-        if let model = normalized(env["ABOUT_TIME_OPENROUTER_MODEL"]) {
-            env["ABOUT_TIME_MEM0_LLM_MODEL"] = model
+        if let model = normalized(settings.openRouterTextModel)
+            ?? normalized(settings.openRouterModel)
+            ?? normalized(env["AGENT_CONTEXT_OPENROUTER_TEXT_MODEL"])
+            ?? normalized(env["AGENT_CONTEXT_OPENROUTER_MODEL"]) {
+            env["AGENT_CONTEXT_MEM0_LLM_MODEL"] = model
         }
-        env["OPENAI_BASE_URL"] = env["ABOUT_TIME_OPENROUTER_BASE_URL"]
-        env["OPENAI_API_BASE"] = env["ABOUT_TIME_OPENROUTER_BASE_URL"]
-        env["ABOUT_TIME_MEM0_EMBED_MODEL"] = env["ABOUT_TIME_MEM0_EMBED_MODEL"] ?? "openai/text-embedding-3-small"
+        env["OPENAI_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"]
+        env["OPENAI_API_BASE"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"]
+        env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] = env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] ?? "openai/text-embedding-3-small"
         process.environment = env
 
         let inputData = try? JSONEncoder().encode(payload)
@@ -219,25 +222,28 @@ final class Mem0Searcher: @unchecked Sendable {
         process.arguments = [scriptURL.path]
 
         var env = ProcessInfo.processInfo.environment
-        env["ABOUT_TIME_MEM0_USER_ID"] = settings.mem0UserID
-        env["ABOUT_TIME_MEM0_AGENT_ID"] = settings.mem0AgentID
-        env["ABOUT_TIME_MEM0_COLLECTION"] = settings.mem0Collection
-        env["ABOUT_TIME_MEM0_HISTORY_DB_PATH"] = baseDirectory
+        env["AGENT_CONTEXT_MEM0_USER_ID"] = settings.mem0UserID
+        env["AGENT_CONTEXT_MEM0_AGENT_ID"] = settings.mem0AgentID
+        env["AGENT_CONTEXT_MEM0_COLLECTION"] = settings.mem0Collection
+        env["AGENT_CONTEXT_MEM0_HISTORY_DB_PATH"] = baseDirectory
             .appendingPathComponent("reports/mem0-history.sqlite").path
-        env["ABOUT_TIME_MEM0_QDRANT_PATH"] = baseDirectory
+        env["AGENT_CONTEXT_MEM0_QDRANT_PATH"] = baseDirectory
             .appendingPathComponent("reports/mem0-qdrant").path
-        env["ABOUT_TIME_OPENROUTER_BASE_URL"] = env["ABOUT_TIME_OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1"
+        env["AGENT_CONTEXT_OPENROUTER_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1"
         if let key = normalized(settings.openRouterAPIKey) {
-            env["ABOUT_TIME_OPENROUTER_API_KEY"] = key
+            env["AGENT_CONTEXT_OPENROUTER_API_KEY"] = key
             env["OPENROUTER_API_KEY"] = key
             env["OPENAI_API_KEY"] = key
         }
-        if let model = normalized(env["ABOUT_TIME_OPENROUTER_MODEL"]) {
-            env["ABOUT_TIME_MEM0_LLM_MODEL"] = model
+        if let model = normalized(settings.openRouterTextModel)
+            ?? normalized(settings.openRouterModel)
+            ?? normalized(env["AGENT_CONTEXT_OPENROUTER_TEXT_MODEL"])
+            ?? normalized(env["AGENT_CONTEXT_OPENROUTER_MODEL"]) {
+            env["AGENT_CONTEXT_MEM0_LLM_MODEL"] = model
         }
-        env["OPENAI_BASE_URL"] = env["ABOUT_TIME_OPENROUTER_BASE_URL"]
-        env["OPENAI_API_BASE"] = env["ABOUT_TIME_OPENROUTER_BASE_URL"]
-        env["ABOUT_TIME_MEM0_EMBED_MODEL"] = env["ABOUT_TIME_MEM0_EMBED_MODEL"] ?? "openai/text-embedding-3-small"
+        env["OPENAI_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"]
+        env["OPENAI_API_BASE"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"]
+        env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] = env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] ?? "openai/text-embedding-3-small"
         process.environment = env
 
         let input: [String: Any] = [

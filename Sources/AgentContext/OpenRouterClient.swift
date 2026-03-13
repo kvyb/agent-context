@@ -31,7 +31,9 @@ struct OpenRouterCallResult: Sendable {
 
 final class OpenRouterClient: @unchecked Sendable {
     private let endpoint: URL
-    private let model: String
+    private let multimodalModel: String
+    private let audioModel: String
+    private let textModel: String
     private let reasoningEffort: String
     private let timeoutSeconds: TimeInterval
     private let appNameHeader: String?
@@ -40,7 +42,9 @@ final class OpenRouterClient: @unchecked Sendable {
 
     init(config: OpenRouterRuntimeConfig, settings: AppSettings) {
         endpoint = config.endpoint
-        model = config.model
+        multimodalModel = AppSettings.normalizedOpenRouterModel(settings.openRouterModel.nilIfEmpty ?? config.model)
+        audioModel = AppSettings.normalizedOpenRouterModel(settings.openRouterAudioModel.nilIfEmpty ?? multimodalModel)
+        textModel = AppSettings.normalizedOpenRouterModel(settings.openRouterTextModel.nilIfEmpty ?? multimodalModel)
         reasoningEffort = config.reasoningEffort
         timeoutSeconds = config.timeoutSeconds
         appNameHeader = settings.openRouterAppNameHeader
@@ -49,6 +53,7 @@ final class OpenRouterClient: @unchecked Sendable {
     }
 
     func analyzeScreenshot(metadata: ArtifactMetadata, apiKey: String) throws -> OpenRouterCallResult {
+        let model = multimodalModel
         let webpData = try webPDataForLLM(from: metadata.path)
         let dataURI = "data:image/webp;base64,\(webpData.base64EncodedString())"
         let aliasList = userIdentityAliases.isEmpty ? "(none provided)" : userIdentityAliases.joined(separator: ", ")
@@ -163,11 +168,12 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        let response = try call(payload: payload, kind: "artifact_screenshot", apiKey: apiKey)
+        let response = try call(payload: payload, model: model, kind: "artifact_screenshot", apiKey: apiKey)
         return response
     }
 
     func analyzeAudioChunk(metadata: ArtifactMetadata, apiKey: String) throws -> OpenRouterCallResult {
+        let model = audioModel
         let audioData = try Data(contentsOf: URL(fileURLWithPath: metadata.path))
         let format = URL(fileURLWithPath: metadata.path).pathExtension.lowercased()
 
@@ -226,7 +232,7 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        return try call(payload: payload, kind: "artifact_audio", apiKey: apiKey)
+        return try call(payload: payload, model: model, kind: "artifact_audio", apiKey: apiKey)
     }
 
     func synthesizePerAppInterval(
@@ -238,6 +244,7 @@ final class OpenRouterClient: @unchecked Sendable {
         timeline: [TimelineSlice],
         apiKey: String
     ) throws -> OpenRouterCallResult {
+        let model = textModel
         let evidenceLines = evidence.map { record in
             let analysis = record.analysis?.summary ?? "pending artifact analysis"
             let entities = record.analysis?.entities.joined(separator: ",") ?? ""
@@ -337,7 +344,7 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        return try call(payload: payload, kind: "synthesis_interval_app", apiKey: apiKey)
+        return try call(payload: payload, model: model, kind: "synthesis_interval_app", apiKey: apiKey)
     }
 
     func synthesizeHour(
@@ -347,6 +354,7 @@ final class OpenRouterClient: @unchecked Sendable {
         timeline: [TimelineSlice],
         apiKey: String
     ) throws -> OpenRouterCallResult {
+        let model = textModel
         let appSummaryLines = intervalSummaries.map {
             "- [\(iso8601($0.bucketStart)) \($0.appName)] \($0.summary)"
         }.joined(separator: "\n")
@@ -434,10 +442,11 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        return try call(payload: payload, kind: "synthesis_hour", apiKey: apiKey)
+        return try call(payload: payload, model: model, kind: "synthesis_hour", apiKey: apiKey)
     }
 
     func planMemoryQuery(question: String, now: Date, apiKey: String) throws -> OpenRouterCallResult {
+        let model = textModel
         let systemPrompt = """
         You generate compact retrieval plans for a life-log memory store.
         Return strict JSON only with keys: queries, timeframe.
@@ -497,7 +506,7 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        return try call(payload: payload, kind: "memory_query_plan", apiKey: apiKey)
+        return try call(payload: payload, model: model, kind: "memory_query_plan", apiKey: apiKey)
     }
 
     func answerMemoryQuery(
@@ -507,6 +516,7 @@ final class OpenRouterClient: @unchecked Sendable {
         bm25EvidenceLines: [String],
         apiKey: String
     ) throws -> OpenRouterCallResult {
+        let model = textModel
         let systemPrompt = """
         You answer memory questions using only retrieved evidence from two retrieval sources.
         Return strict JSON with keys: answer, key_points, supporting_events, insufficient_evidence.
@@ -569,10 +579,10 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        return try call(payload: payload, kind: "memory_query_answer", apiKey: apiKey)
+        return try call(payload: payload, model: model, kind: "memory_query_answer", apiKey: apiKey)
     }
 
-    private func call(payload: [String: Any], kind: String, apiKey: String) throws -> OpenRouterCallResult {
+    private func call(payload: [String: Any], model: String, kind: String, apiKey: String) throws -> OpenRouterCallResult {
         let body = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var request = URLRequest(url: endpoint)
@@ -753,7 +763,7 @@ final class OpenRouterClient: @unchecked Sendable {
         guard let pngData = encodePNG(image: image) else { return nil }
 
         let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("about-time-or-webp-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("agent-context-or-webp-\(UUID().uuidString)", isDirectory: true)
         let inputURL = tempDirectory.appendingPathComponent("input.png")
         let outputURL = tempDirectory.appendingPathComponent("output.webp")
 

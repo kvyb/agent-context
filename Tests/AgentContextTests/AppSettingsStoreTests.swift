@@ -8,12 +8,18 @@ final class AppSettingsStoreTests: XCTestCase {
 
         var settings = AppSettings.default
         settings.openRouterAPIKey = "sk-test"
+        settings.openRouterModel = "google/gemini-3.1-flash-lite-preview"
+        settings.openRouterAudioModel = "openai/gpt-4o-mini-transcribe"
+        settings.openRouterTextModel = "openai/gpt-5-mini"
         settings.captureScreenshots = false
 
         try AppSettingsStore.save(settings, baseDirectory: directory)
 
         let loaded = AppSettingsStore.load(baseDirectory: directory, env: [:])
         XCTAssertEqual(loaded.openRouterAPIKey, "sk-test")
+        XCTAssertEqual(loaded.openRouterModel, "google/gemini-3.1-flash-lite-preview")
+        XCTAssertEqual(loaded.openRouterAudioModel, "openai/gpt-4o-mini-transcribe")
+        XCTAssertEqual(loaded.openRouterTextModel, "openai/gpt-5-mini")
         XCTAssertFalse(loaded.captureScreenshots)
     }
 
@@ -41,9 +47,39 @@ final class AppSettingsStoreTests: XCTestCase {
 
         let loaded = AppSettingsStore.load(
             baseDirectory: directory,
-            env: ["ABOUT_TIME_USER_ALIASES": "Jane Doe, @jane, jane doe"]
+            env: ["AGENT_CONTEXT_USER_ALIASES": "Jane Doe, @jane, jane doe"]
         )
         XCTAssertEqual(loaded.userIdentityAliases, ["Jane Doe", "@jane"])
+    }
+
+    func testLoadUsesOpenRouterModelEnvFallbackWhenSettingsMissing() {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let loaded = AppSettingsStore.load(
+            baseDirectory: directory,
+            env: ["AGENT_CONTEXT_OPENROUTER_MODEL": "anthropic/claude-sonnet-4"]
+        )
+        XCTAssertEqual(loaded.openRouterModel, "anthropic/claude-sonnet-4")
+        XCTAssertEqual(loaded.openRouterAudioModel, "anthropic/claude-sonnet-4")
+        XCTAssertEqual(loaded.openRouterTextModel, "anthropic/claude-sonnet-4")
+    }
+
+    func testLoadUsesPerModeModelEnvOverrides() {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let loaded = AppSettingsStore.load(
+            baseDirectory: directory,
+            env: [
+                "AGENT_CONTEXT_OPENROUTER_MODEL": "google/gemini-3.1-flash-lite-preview",
+                "AGENT_CONTEXT_OPENROUTER_AUDIO_MODEL": "openai/gpt-4o-mini-transcribe",
+                "AGENT_CONTEXT_OPENROUTER_TEXT_MODEL": "openai/gpt-5-mini"
+            ]
+        )
+        XCTAssertEqual(loaded.openRouterModel, "google/gemini-3.1-flash-lite-preview")
+        XCTAssertEqual(loaded.openRouterAudioModel, "openai/gpt-4o-mini-transcribe")
+        XCTAssertEqual(loaded.openRouterTextModel, "openai/gpt-5-mini")
     }
 
     private func temporaryDirectory() -> URL {
