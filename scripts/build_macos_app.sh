@@ -85,7 +85,7 @@ cat > "${APP_BUNDLE_PATH}/Contents/Info.plist" <<'PLIST'
 PLIST
 
 if command -v codesign >/dev/null 2>&1; then
-  SIGN_IDENTITY="${ABOUT_TIME_CODESIGN_IDENTITY:-}"
+  SIGN_IDENTITY="${AGENT_CONTEXT_CODESIGN_IDENTITY:-}"
   if [[ -z "${SIGN_IDENTITY}" ]] && command -v security >/dev/null 2>&1; then
     SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk -F\" '/Apple Development/ {print $2; exit}')"
   fi

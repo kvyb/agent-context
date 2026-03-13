@@ -85,8 +85,8 @@ Product spec:
 ## Local-First, Private by Default
 
 Primary data stays local:
-- screenshots/audio under `~/.about-time/`
-- SQLite activity DB at `~/.about-time/reports/activity.sqlite`
+- screenshots/audio under `~/.agent-context/`
+- SQLite activity DB at `~/.agent-context/reports/activity.sqlite`
 - local Mem0 history DB + local vector store path
 
 Inference is provider-flexible as long as it is OpenAI-compatible API format.
@@ -103,6 +103,24 @@ These numbers depend on your model choice and capture volume.
 Suggested model: google/gemini-3.1-flash-lite-preview
 
 ## Run
+
+Self-hosted install (no signing keys required):
+
+```bash
+./scripts/install.sh
+```
+
+This installs:
+- repo checkout at `~/agent-context`
+- app bundle at `~/Applications/Agent Context.app`
+- env file at `~/.agent-context/.env` (user-managed)
+
+Check/update from GitHub `main`:
+
+```bash
+./scripts/update.sh --status
+./scripts/update.sh --apply
+```
 
 App mode:
 
