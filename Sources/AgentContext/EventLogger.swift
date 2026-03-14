@@ -36,7 +36,9 @@ final class RuntimeLog: @unchecked Sendable {
                 try? data.write(to: fileURL, options: .atomic)
             }
         }
-        print(rendered, terminator: "")
+        if let data = rendered.data(using: .utf8) {
+            FileHandle.standardError.write(data)
+        }
     }
 }
 

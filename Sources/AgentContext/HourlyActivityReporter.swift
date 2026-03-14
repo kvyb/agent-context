@@ -188,6 +188,13 @@ final class HourlyActivityReporter: @unchecked Sendable {
         var prepared: [(summary: IntervalSummary, usage: LLMUsageEvent?, segments: [TaskSegmentRecord])] = []
 
         for appDuration in appDurations {
+            if SystemAppDenylist.isDenied(
+                appName: appDuration.appName,
+                bundleID: appDuration.bundleID
+            ) {
+                continue
+            }
+
             let evidence = try wait {
                 try await self.database.evidenceForBucket(
                     start: start,

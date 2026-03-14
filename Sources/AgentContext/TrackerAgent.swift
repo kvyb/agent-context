@@ -17,6 +17,7 @@ final class TrackerAgent: @unchecked Sendable {
     private let audioCoordinator: AudioCaptureCoordinator
     private let retryJournal: RetryJournal
     private let hourlyReporter: HourlyActivityReporter
+    private let fileManager = FileManager.default
 
     private let stateQueue = DispatchQueue(label: "agent-context.tracker.state")
     private let analysisQueue = DispatchQueue(label: "agent-context.tracker.analysis", qos: .utility)
@@ -35,10 +36,6 @@ final class TrackerAgent: @unchecked Sendable {
     private var inflightArtifactIDs = Set<String>()
     private var cachedScreenshotAnalysis: CachedScreenshotAnalysis?
     private let screenshotSimilaritySkipThreshold = 0.9975
-    private let ignoredSystemBundleIDs: Set<String> = [
-        "com.apple.loginwindow",
-        "com.apple.ScreenSaver.Engine"
-    ]
 
     init(
         config: TrackerConfig,
@@ -284,11 +281,10 @@ final class TrackerAgent: @unchecked Sendable {
     }
 
     private func shouldIgnore(app: NSRunningApplication) -> Bool {
-        if let bundleID = app.bundleIdentifier, ignoredSystemBundleIDs.contains(bundleID) {
-            return true
-        }
-
-        if (app.localizedName ?? "").lowercased() == "loginwindow" {
+        if SystemAppDenylist.isDenied(
+            appName: app.localizedName,
+            bundleID: app.bundleIdentifier
+        ) {
             return true
         }
 
@@ -440,20 +436,16 @@ final class TrackerAgent: @unchecked Sendable {
         ) {
             Task {
                 do {
-                    try await database.markEvidenceAnalyzed(
-                        evidenceID: metadata.id,
-                        analysis: dedupe.analysis,
-                        usage: nil,
-                        model: "local/screenshot-dedupe"
-                    )
-                    await retryJournal.remove(id: metadata.id)
+                    try await database.deleteEvidence(evidenceID: metadata.id)
                 } catch {
-                    logger.error("Failed updating deduplicated artifact \(metadata.id): \(error.localizedDescription)")
+                    logger.error("Failed deleting deduplicated artifact \(metadata.id): \(error.localizedDescription)")
                 }
+                await retryJournal.remove(id: metadata.id)
+                removeArtifactFileIfPresent(path: metadata.path)
             }
 
             logger.info(
-                "Skipped screenshot LLM analysis for \(metadata.id): " +
+                "Discarded screenshot \(metadata.id): " +
                 "\(formatSimilarityPercentage(dedupe.similarity)) similar to previous analyzed screenshot"
             )
             return
@@ -529,30 +521,7 @@ final class TrackerAgent: @unchecked Sendable {
             return nil
         }
 
-        let percent = formatSimilarityPercentage(similarity)
-        let summary = "No meaningful visual change from previous screenshot (\(percent) similar)."
         let previous = cachedScreenshotAnalysis.sourceAnalysis
-        let combinedEvidence = previous.evidence + [
-            "Screenshot analysis deduplicated locally because similarity to previous analyzed screenshot was \(percent)."
-        ]
-
-        let deduplicatedAnalysis = ArtifactAnalysis(
-            description: summary,
-            problem: previous.problem,
-            success: previous.success,
-            userContribution: previous.userContribution,
-            suggestionOrDecision: previous.suggestionOrDecision,
-            status: previous.status,
-            confidence: max(previous.confidence, 0.75),
-            summary: summary,
-            transcript: nil,
-            entities: previous.entities,
-            insufficientEvidence: false,
-            project: previous.project ?? metadata.window.project,
-            workspace: previous.workspace ?? metadata.window.workspace,
-            task: previous.task ?? metadata.window.title,
-            evidence: combinedEvidence
-        )
 
         cacheLatestAnalyzedScreenshot(
             metadata: metadata,
@@ -561,9 +530,18 @@ final class TrackerAgent: @unchecked Sendable {
         )
 
         return DeduplicatedScreenshotDecision(
-            analysis: deduplicatedAnalysis,
             similarity: similarity
         )
+    }
+
+    private func removeArtifactFileIfPresent(path: String) {
+        guard !path.isEmpty else { return }
+        guard fileManager.fileExists(atPath: path) else { return }
+        do {
+            try fileManager.removeItem(atPath: path)
+        } catch {
+            logger.error("Failed deleting deduplicated artifact file \(path): \(error.localizedDescription)")
+        }
     }
 
     private func cacheLatestAnalyzedScreenshot(
@@ -711,6 +689,5 @@ private struct CachedScreenshotAnalysis {
 }
 
 private struct DeduplicatedScreenshotDecision {
-    let analysis: ArtifactAnalysis
     let similarity: Double
 }

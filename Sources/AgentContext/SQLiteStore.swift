@@ -359,6 +359,15 @@ actor SQLiteStore {
         try step(statement)
     }
 
+    func deleteEvidence(evidenceID: String) throws {
+        let sql = "DELETE FROM evidence WHERE id = ?;"
+        var statement: OpaquePointer?
+        try prepare(sql, statement: &statement)
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: evidenceID)
+        try step(statement)
+    }
+
     func listEvidenceForBackfill(limit: Int) throws -> [ArtifactMetadata] {
         let sql = """
             SELECT id, kind, artifact_path, captured_at, app_name, bundle_id, pid,

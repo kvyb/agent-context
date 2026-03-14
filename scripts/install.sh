@@ -12,6 +12,7 @@ INSTALL_DIR="${AGENT_CONTEXT_INSTALL_DIR:-${HOME}/agent-context}"
 APP_BUNDLE_PATH="${AGENT_CONTEXT_APP_BUNDLE_PATH:-${HOME}/Applications/Agent Context.app}"
 BRANCH="${AGENT_CONTEXT_INSTALL_BRANCH:-main}"
 LAUNCH_AFTER_INSTALL=1
+CLI_BIN_DIR="${AGENT_CONTEXT_CLI_BIN_DIR:-${HOME}/.local/bin}"
 
 usage() {
   cat <<'USAGE'
@@ -22,6 +23,7 @@ Options:
   --install-dir <path> Install/update checkout path (default: ~/agent-context)
   --app-path <path>    App bundle destination path (default: ~/Applications/Agent Context.app)
   --branch <name>      Branch to install (default: main)
+  --cli-bin-dir <path> Directory where agent-context CLI symlink is installed (default: ~/.local/bin)
   --no-launch          Do not launch app after installation
   -h, --help           Show this help
 USAGE
@@ -81,6 +83,10 @@ while [[ $# -gt 0 ]]; do
       BRANCH="${2:-}"
       shift 2
       ;;
+    --cli-bin-dir)
+      CLI_BIN_DIR="${2:-}"
+      shift 2
+      ;;
     --no-launch)
       LAUNCH_AFTER_INSTALL=0
       shift
@@ -97,7 +103,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "${REPO_URL}" || -z "${INSTALL_DIR}" || -z "${APP_BUNDLE_PATH}" || -z "${BRANCH}" ]]; then
+if [[ -z "${REPO_URL}" || -z "${INSTALL_DIR}" || -z "${APP_BUNDLE_PATH}" || -z "${BRANCH}" || -z "${CLI_BIN_DIR}" ]]; then
   echo "error: invalid empty argument." >&2
   exit 1
 fi
@@ -105,6 +111,7 @@ fi
 mkdir -p "$(dirname "${INSTALL_DIR}")"
 mkdir -p "$(dirname "${APP_BUNDLE_PATH}")"
 mkdir -p "${HOME}/.agent-context"
+mkdir -p "${CLI_BIN_DIR}"
 
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
   if ! is_repo_root "${INSTALL_DIR}"; then
@@ -140,6 +147,12 @@ fi
 echo "Building app bundle..."
 "${INSTALL_DIR}/scripts/build_macos_app.sh" "${APP_BUNDLE_PATH}"
 
+CLI_TARGET="${INSTALL_DIR}/.build/release/agent-context"
+CLI_LINK="${CLI_BIN_DIR}/agent-context"
+if [[ -x "${CLI_TARGET}" ]]; then
+  ln -sf "${CLI_TARGET}" "${CLI_LINK}"
+fi
+
 ENV_FILE="${HOME}/.agent-context/.env"
 if [[ ! -f "${ENV_FILE}" ]]; then
   cat > "${ENV_FILE}" <<'ENV'
@@ -155,7 +168,11 @@ echo ""
 echo "Installed Agent Context."
 echo "Repo: ${INSTALL_DIR}"
 echo "App:  ${APP_BUNDLE_PATH}"
+echo "CLI:  ${CLI_LINK}"
 echo "Env:  ${ENV_FILE}"
+echo ""
+echo "If needed, add CLI to PATH:"
+echo "  export PATH=\"${CLI_BIN_DIR}:\$PATH\""
 echo ""
 echo "Update later with:"
 echo "  ${INSTALL_DIR}/scripts/update.sh --apply"

@@ -29,4 +29,22 @@ final class QueryCLICommandTests: XCTestCase {
             try QueryCLICommand.parse(arguments: ["agent-context", "--query"])
         )
     }
+
+    func testParsesQuerySubcommandPositional() throws {
+        let options = try QueryCLICommand.parse(arguments: ["agent-context", "query", "what changed today?", "--json"])
+        XCTAssertEqual(options?.query, "what changed today?")
+        XCTAssertEqual(options?.outputFormat, .json)
+    }
+
+    func testParsesQuerySubcommandQuestionFlag() throws {
+        let options = try QueryCLICommand.parse(arguments: ["agent-context", "query", "--question", "status", "--format", "text"])
+        XCTAssertEqual(options?.query, "status")
+        XCTAssertEqual(options?.outputFormat, .text)
+    }
+
+    func testQuerySubcommandMissingValueThrows() {
+        XCTAssertThrowsError(
+            try QueryCLICommand.parse(arguments: ["agent-context", "query"])
+        )
+    }
 }

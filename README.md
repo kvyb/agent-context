@@ -48,7 +48,7 @@ Natural-language queries that actually matter:
 Your local agent can call one CLI command and hydrate itself with your most recent, high-signal context before planning or execution.
 
 ```bash
-agent-context --query "what did I forget to finalize this week?" --format json
+agent-context query "what did I forget to finalize this week?" --json
 ```
 
 - `--format text` for humans
@@ -62,6 +62,31 @@ JSON output includes:
 
 Internal CLI contract for agent builders:
 - [`docs/internal-agent-cli.md`](docs/internal-agent-cli.md)
+- [`docs/agent-cli-integration.md`](docs/agent-cli-integration.md)
+
+Claude Code integration (one-time setup, works from any repo on the same Mac):
+- [`docs/claude-integration.md`](docs/claude-integration.md)
+
+Quick connect:
+```bash
+cd /Users/kvyb/Documents/Code/myapps/agent-context
+mkdir -p ~/.local/bin ~/.claude/skills/agent-context-memory
+cp scripts/agent_context_query.sh ~/.local/bin/agent_context_query.sh && chmod +x ~/.local/bin/agent_context_query.sh
+cat > ~/.claude/skills/agent-context-memory/SKILL.md <<'EOF'
+---
+name: agent-context-memory
+description: Query local Agent Context memory (Mem0 + BM25) to answer what the user worked on, what changed, and what may be unfinished.
+argument-hint: "<question>"
+---
+
+# Agent Context Memory
+
+Run: ~/.local/bin/agent_context_query.sh "$ARGUMENTS"
+EOF
+```
+
+Then in Claude Code (any repo on the same Mac), ask:
+- `Use agent-context-memory: what did I work on today?`
 
 ## How It Works
 
@@ -115,6 +140,7 @@ This installs:
 - repo checkout at `~/agent-context`
 - app bundle at `~/Applications/Agent Context.app`
 - env file at `~/.agent-context/.env` (user-managed)
+- CLI symlink at `~/.local/bin/agent-context` for other agents/tools
 
 Check/update from GitHub `main`:
 
@@ -138,6 +164,7 @@ swift run agent-context --cli
 Query mode:
 
 ```bash
+agent-context query "what did I work on today?" --json
 swift run agent-context --query "what did I work on today?" --format text
 swift run agent-context --query "what did I work on today?" --format json
 ```

@@ -21,6 +21,10 @@ struct QueryCLIOptions: Sendable {
 
 enum QueryCLICommand {
     static func parse(arguments: [String]) throws -> QueryCLIOptions? {
+        if arguments.count > 1, arguments[1].lowercased() == "query" {
+            return try parseSubcommand(arguments: arguments)
+        }
+
         guard let queryIndex = arguments.firstIndex(of: "--query") else {
             return nil
         }
@@ -52,5 +56,48 @@ enum QueryCLICommand {
             return nil
         }
         return arguments[valueIndex].trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    }
+
+    private static func parseSubcommand(arguments: [String]) throws -> QueryCLIOptions {
+        let tail = Array(arguments.dropFirst(2))
+
+        let query = argumentValue(flag: "--query", in: tail)
+            ?? argumentValue(flag: "--question", in: tail)
+            ?? firstPositionalValue(in: tail)
+        guard let query else {
+            throw QueryCLIArgumentError.missingQueryValue
+        }
+
+        let formatRaw: String
+        if tail.contains("--json") {
+            formatRaw = MemoryQueryOutputFormat.json.rawValue
+        } else {
+            formatRaw = argumentValue(flag: "--format", in: tail) ?? MemoryQueryOutputFormat.text.rawValue
+        }
+
+        guard let outputFormat = MemoryQueryOutputFormat(rawValue: formatRaw.lowercased()) else {
+            throw QueryCLIArgumentError.invalidFormat(formatRaw)
+        }
+
+        return QueryCLIOptions(query: query, outputFormat: outputFormat)
+    }
+
+    private static func firstPositionalValue(in arguments: [String]) -> String? {
+        var skipNext = false
+        for arg in arguments {
+            if skipNext {
+                skipNext = false
+                continue
+            }
+            if arg == "--query" || arg == "--question" || arg == "--format" {
+                skipNext = true
+                continue
+            }
+            if arg.hasPrefix("--") {
+                continue
+            }
+            return arg.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        }
+        return nil
     }
 }

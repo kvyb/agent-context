@@ -14,12 +14,20 @@ Use the query route to ask natural-language questions about tracked work context
 agent-context --query "<natural language question>" [--format text|json]
 ```
 
+Preferred agent-friendly form:
+
+```bash
+agent-context query "<natural language question>" [--json|--format text|json]
+```
+
 ## Flags
 
 - `--query "<text>"` (required): natural-language question.
 - `--format text|json` (optional):
   - `text` default.
   - `json` for machine consumption.
+- `query "<text>"` (subcommand form): positional question.
+- `--json` (subcommand form): shortcut for `--format json`.
 
 ## Environment / Runtime Requirements
 
