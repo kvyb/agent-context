@@ -33,6 +33,8 @@ final class TrackerAgent: @unchecked Sendable {
     private var activeScreenshotTimer: DispatchSourceTimer?
     private var retryTimer: DispatchSourceTimer?
     private var inflightArtifactIDs = Set<String>()
+    private var cachedScreenshotAnalysis: CachedScreenshotAnalysis?
+    private let screenshotSimilaritySkipThreshold = 0.9975
     private let ignoredSystemBundleIDs: Set<String> = [
         "com.apple.loginwindow",
         "com.apple.ScreenSaver.Engine"
@@ -428,6 +430,35 @@ final class TrackerAgent: @unchecked Sendable {
     }
 
     private func analyzeArtifact(metadata: ArtifactMetadata, priorAttempts: Int) {
+        let screenshotFingerprint: ScreenshotFingerprint? = metadata.kind == .screenshot
+            ? ScreenshotSimilarity.fingerprint(forImageAtPath: metadata.path)
+            : nil
+
+        if let dedupe = deduplicatedScreenshotAnalysisIfNeeded(
+            metadata: metadata,
+            fingerprint: screenshotFingerprint
+        ) {
+            Task {
+                do {
+                    try await database.markEvidenceAnalyzed(
+                        evidenceID: metadata.id,
+                        analysis: dedupe.analysis,
+                        usage: nil,
+                        model: "local/screenshot-dedupe"
+                    )
+                    await retryJournal.remove(id: metadata.id)
+                } catch {
+                    logger.error("Failed updating deduplicated artifact \(metadata.id): \(error.localizedDescription)")
+                }
+            }
+
+            logger.info(
+                "Skipped screenshot LLM analysis for \(metadata.id): " +
+                "\(formatSimilarityPercentage(dedupe.similarity)) similar to previous analyzed screenshot"
+            )
+            return
+        }
+
         guard let apiKey = apiKeyProvider()?.nilIfEmpty else {
             scheduleRetry(metadata: metadata, priorAttempts: priorAttempts, error: "missing OPENROUTER_API_KEY")
             return
@@ -451,6 +482,14 @@ final class TrackerAgent: @unchecked Sendable {
                 fallbackTaskHint: metadata.window.title
             )
 
+            if metadata.kind == .screenshot, let screenshotFingerprint {
+                cacheLatestAnalyzedScreenshot(
+                    metadata: metadata,
+                    fingerprint: screenshotFingerprint,
+                    sourceAnalysis: analysis
+                )
+            }
+
             Task {
                 do {
                     try await database.markEvidenceAnalyzed(
@@ -469,6 +508,87 @@ final class TrackerAgent: @unchecked Sendable {
         } catch {
             scheduleRetry(metadata: metadata, priorAttempts: priorAttempts, error: error.localizedDescription)
         }
+    }
+
+    private func deduplicatedScreenshotAnalysisIfNeeded(
+        metadata: ArtifactMetadata,
+        fingerprint: ScreenshotFingerprint?
+    ) -> DeduplicatedScreenshotDecision? {
+        guard metadata.kind == .screenshot else { return nil }
+        guard let fingerprint, let cachedScreenshotAnalysis else { return nil }
+        let contextKey = screenshotContextKey(from: metadata)
+        guard cachedScreenshotAnalysis.contextKey == contextKey else {
+            return nil
+        }
+
+        let similarity = ScreenshotSimilarity.similarity(
+            fingerprint,
+            cachedScreenshotAnalysis.fingerprint
+        )
+        guard similarity >= screenshotSimilaritySkipThreshold else {
+            return nil
+        }
+
+        let percent = formatSimilarityPercentage(similarity)
+        let summary = "No meaningful visual change from previous screenshot (\(percent) similar)."
+        let previous = cachedScreenshotAnalysis.sourceAnalysis
+        let combinedEvidence = previous.evidence + [
+            "Screenshot analysis deduplicated locally because similarity to previous analyzed screenshot was \(percent)."
+        ]
+
+        let deduplicatedAnalysis = ArtifactAnalysis(
+            description: summary,
+            problem: previous.problem,
+            success: previous.success,
+            userContribution: previous.userContribution,
+            suggestionOrDecision: previous.suggestionOrDecision,
+            status: previous.status,
+            confidence: max(previous.confidence, 0.75),
+            summary: summary,
+            transcript: nil,
+            entities: previous.entities,
+            insufficientEvidence: false,
+            project: previous.project ?? metadata.window.project,
+            workspace: previous.workspace ?? metadata.window.workspace,
+            task: previous.task ?? metadata.window.title,
+            evidence: combinedEvidence
+        )
+
+        cacheLatestAnalyzedScreenshot(
+            metadata: metadata,
+            fingerprint: fingerprint,
+            sourceAnalysis: previous
+        )
+
+        return DeduplicatedScreenshotDecision(
+            analysis: deduplicatedAnalysis,
+            similarity: similarity
+        )
+    }
+
+    private func cacheLatestAnalyzedScreenshot(
+        metadata: ArtifactMetadata,
+        fingerprint: ScreenshotFingerprint,
+        sourceAnalysis: ArtifactAnalysis
+    ) {
+        cachedScreenshotAnalysis = CachedScreenshotAnalysis(
+            contextKey: screenshotContextKey(from: metadata),
+            fingerprint: fingerprint,
+            sourceAnalysis: sourceAnalysis
+        )
+    }
+
+    private func screenshotContextKey(from metadata: ArtifactMetadata) -> String {
+        [
+            metadata.app.appName,
+            metadata.window.title ?? "",
+            metadata.window.documentPath ?? "",
+            metadata.window.url ?? ""
+        ].joined(separator: "\u{241F}")
+    }
+
+    private func formatSimilarityPercentage(_ similarity: Double) -> String {
+        String(format: "%.2f%%", max(0, min(1, similarity)) * 100)
     }
 
     private func scheduleRetry(metadata: ArtifactMetadata, priorAttempts: Int, error: String) {
@@ -582,4 +702,15 @@ final class TrackerAgent: @unchecked Sendable {
             )
         }
     }
+}
+
+private struct CachedScreenshotAnalysis {
+    let contextKey: String
+    let fingerprint: ScreenshotFingerprint
+    let sourceAnalysis: ArtifactAnalysis
+}
+
+private struct DeduplicatedScreenshotDecision {
+    let analysis: ArtifactAnalysis
+    let similarity: Double
 }

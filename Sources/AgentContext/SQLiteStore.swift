@@ -308,8 +308,8 @@ actor SQLiteStore {
     func markEvidenceAnalyzed(
         evidenceID: String,
         analysis: ArtifactAnalysis,
-        usage: LLMUsageEvent,
-        model: String
+        usage: LLMUsageEvent?,
+        model: String?
     ) throws {
         let analysisData = try jsonEncoder.encode(analysis)
         let analysisJSON = String(data: analysisData, encoding: .utf8) ?? "{}"
@@ -331,14 +331,16 @@ actor SQLiteStore {
         defer { sqlite3_finalize(statement) }
 
         bindText(statement, index: 1, value: analysisJSON)
-        bindText(statement, index: 2, value: model)
-        sqlite3_bind_int(statement, 3, Int32(usage.inputTokens))
-        sqlite3_bind_int(statement, 4, Int32(usage.outputTokens))
-        sqlite3_bind_int(statement, 5, Int32(usage.audioTokens))
+        bindOptionalText(statement, index: 2, value: model)
+        sqlite3_bind_int(statement, 3, Int32(usage?.inputTokens ?? 0))
+        sqlite3_bind_int(statement, 4, Int32(usage?.outputTokens ?? 0))
+        sqlite3_bind_int(statement, 5, Int32(usage?.audioTokens ?? 0))
         bindText(statement, index: 6, value: evidenceID)
         try step(statement)
 
-        try appendUsageEvent(usage)
+        if let usage {
+            try appendUsageEvent(usage)
+        }
     }
 
     func markEvidenceFailed(evidenceID: String, errorMessage: String) throws {
