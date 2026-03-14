@@ -2,6 +2,18 @@ import Foundation
 import AppKit
 
 do {
+    let rootAction = RootCLICommand.parse(arguments: CommandLine.arguments)
+    switch rootAction {
+    case .help:
+        print(RootCLICommand.helpText(programName: "agent-context"))
+        exit(0)
+    case .version:
+        print(RootCLICommand.versionText())
+        exit(0)
+    case .run:
+        break
+    }
+
     if let settingsOptions = try SettingsCLICommand.parse(arguments: CommandLine.arguments) {
         runSettingsMode(settingsOptions)
     } else if let options = try QueryCLICommand.parse(arguments: CommandLine.arguments) {
@@ -67,5 +79,48 @@ private func runSettingsMode(_ options: SettingsCLIOptions) {
     } catch {
         fputs("fatal: \(error.localizedDescription)\n", stderr)
         exit(1)
+    }
+}
+
+private enum RootCLIAction {
+    case help
+    case version
+    case run
+}
+
+private enum RootCLICommand {
+    static func parse(arguments: [String]) -> RootCLIAction {
+        guard arguments.count > 1 else {
+            return .run
+        }
+
+        let first = arguments[1].lowercased()
+        if first == "-h" || first == "--help" || first == "help" {
+            return .help
+        }
+        if first == "--version" || first == "version" {
+            return .version
+        }
+        return .run
+    }
+
+    static func helpText(programName: String) -> String {
+        """
+        Usage:
+          \(programName) [--cli]
+          \(programName) query "<question>" [--json|--format text|json]
+          \(programName) --query "<question>" [--format text|json]
+          \(programName) --set-user-aliases "<alias1,alias2,...>"
+          \(programName) --help
+          \(programName) --version
+
+        Notes:
+          - Run without flags to open the Agent Context menu bar app.
+          - Query commands return natural-language memory answers.
+        """
+    }
+
+    static func versionText() -> String {
+        return "agent-context 0.1.0"
     }
 }
