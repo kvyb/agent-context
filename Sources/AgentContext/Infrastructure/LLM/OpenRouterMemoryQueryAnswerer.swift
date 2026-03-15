@@ -34,7 +34,7 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
         let settings = settingsProvider()
         let client = OpenRouterClient(config: openRouterConfig, settings: settings)
 
-        let evidenceLimit = detailLevel == .detailed ? 60 : 24
+        let evidenceLimit = detailLevel == .detailed ? 120 : 36
         let orderedMem0 = orderedEvidence(mem0Evidence, detailLevel: detailLevel)
         let orderedBM25 = orderedEvidence(bm25Evidence, detailLevel: detailLevel)
         let mem0Lines = orderedMem0.prefix(evidenceLimit).map(formatEvidenceLine)

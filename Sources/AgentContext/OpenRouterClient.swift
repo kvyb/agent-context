@@ -34,6 +34,7 @@ final class OpenRouterClient: @unchecked Sendable {
     private let multimodalModel: String
     private let audioModel: String
     private let textModel: String
+    private let queryAgentModel: String
     private let reasoningEffort: String
     private let timeoutSeconds: TimeInterval
     private let appNameHeader: String?
@@ -45,6 +46,7 @@ final class OpenRouterClient: @unchecked Sendable {
         multimodalModel = AppSettings.normalizedOpenRouterModel(settings.openRouterModel.nilIfEmpty ?? config.model)
         audioModel = AppSettings.normalizedOpenRouterModel(settings.openRouterAudioModel.nilIfEmpty ?? multimodalModel)
         textModel = AppSettings.normalizedOpenRouterModel(settings.openRouterTextModel.nilIfEmpty ?? multimodalModel)
+        queryAgentModel = "google/gemini-3-flash-preview"
         reasoningEffort = config.reasoningEffort
         timeoutSeconds = config.timeoutSeconds
         appNameHeader = settings.openRouterAppNameHeader
@@ -78,7 +80,7 @@ final class OpenRouterClient: @unchecked Sendable {
         - evidence should contain visible clues that support inference claims.
         - Focus on task, document, page, file, workspace, project, and employer when visible.
         - Never hallucinate.
-        - Do not mention About Time UI unless it is the active app itself.
+        - Do not mention Agent Context UI unless it is the active app itself.
         - Do not output generic boilerplate like \"user is active in APP\".
         - Avoid phrasing like \"the user is ...\". Prefer neutral wording like \"Reviewing ...\".
         - Infer likely authorship when possible, even if the user's alias is not visible.
@@ -461,12 +463,13 @@ final class OpenRouterClient: @unchecked Sendable {
         timeZone: TimeZone,
         apiKey: String
     ) throws -> OpenRouterCallResult {
-        let model = textModel
         let systemPrompt = """
         You generate compact retrieval plans for a life-log memory store.
-        Return strict JSON only with keys: queries, timeframe.
+        Return strict JSON only with keys: detail_level, queries, timeframe.
         Rules:
         - queries: 1-10 short retrieval queries ordered by expected usefulness.
+        - Keep queries retrieval-oriented (nouns/entities/actions), never answer-oriented.
+        - If the question names a specific project/repo/person/entity, include that token verbatim in most queries.
         - Keep user entities/nouns exactly as written when present.
         - Add aliases only when high-confidence and concise.
         - Avoid paraphrase explosion; do not output near-duplicate queries.
@@ -489,7 +492,7 @@ final class OpenRouterClient: @unchecked Sendable {
         """
 
         let payload: [String: Any] = [
-            "model": model,
+            "model": queryAgentModel,
             "reasoning": ["effort": reasoningEffort],
             "temperature": 0.1,
             "response_format": [
@@ -532,7 +535,12 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        return try call(payload: payload, model: model, kind: "memory_query_plan", apiKey: apiKey)
+        return try callWithFallbackModels(
+            payload: payload,
+            models: preferredQueryModels(),
+            kind: "memory_query_plan",
+            apiKey: apiKey
+        )
     }
 
     func answerMemoryQuery(
@@ -545,7 +553,6 @@ final class OpenRouterClient: @unchecked Sendable {
         bm25EvidenceLines: [String],
         apiKey: String
     ) throws -> OpenRouterCallResult {
-        let model = textModel
         let systemPrompt = """
         You answer memory questions using only retrieved evidence from two retrieval sources.
         Return strict JSON with keys: answer, key_points, supporting_events, insufficient_evidence.
@@ -554,6 +561,7 @@ final class OpenRouterClient: @unchecked Sendable {
         - There are two sources: MEM0_SEMANTIC and BM25_STORAGE.
         - Prefer facts that appear in both sources when possible.
         - If sources conflict, state the conflict explicitly and lower confidence.
+        - Keep the answer focused on the entities/topics explicitly asked in the question; skip unrelated memories.
         - answer should directly address the user's question.
         - key_points: factual bullets.
         - supporting_events: short event lines with timestamps/apps when available.
@@ -561,12 +569,17 @@ final class OpenRouterClient: @unchecked Sendable {
         - Treat explicit dates as hard constraints.
         - If detail level is detailed: provide chronological, specific event breakdown and avoid hand-wavy summary language.
         - If detail level is detailed:
+          - answer must start with a one-paragraph summary and then a "Timeline" section,
           - answer must include a date/time ordered breakdown (oldest -> newest),
+          - each timeline bullet should start with [YYYY-MM-DD HH:mm] when timestamp is present,
           - include concrete actions, changes, outcomes, and open follow-ups,
-          - key_points should usually be 6-20 items,
-          - supporting_events should usually be 10-80 items when evidence exists.
+          - include concrete artifacts when present (files, commands, URLs, errors, PRs/issues, model names, settings keys),
+          - avoid vague phrases like "worked on stuff" or "made progress",
+          - key_points should usually be 8-30 items,
+          - supporting_events should usually be 12-120 items when evidence exists.
         - If detail level is concise:
-          - keep key_points around 2-8 and supporting_events around 2-12.
+          - keep key_points around 3-8 and supporting_events around 4-16.
+        - If requested scope is broad but evidence is sparse, be explicit about gaps by day or topic.
         """
 
         let scopeText = scope.label?.nilIfEmpty ?? "unspecified"
@@ -591,7 +604,7 @@ final class OpenRouterClient: @unchecked Sendable {
         """
 
         let payload: [String: Any] = [
-            "model": model,
+            "model": queryAgentModel,
             "reasoning": ["effort": reasoningEffort],
             "temperature": 0.1,
             "response_format": [
@@ -624,7 +637,46 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        return try call(payload: payload, model: model, kind: "memory_query_answer", apiKey: apiKey)
+        return try callWithFallbackModels(
+            payload: payload,
+            models: preferredQueryModels(),
+            kind: "memory_query_answer",
+            apiKey: apiKey
+        )
+    }
+
+    private func preferredQueryModels() -> [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for model in [queryAgentModel, textModel] {
+            guard seen.insert(model).inserted else { continue }
+            ordered.append(model)
+        }
+        return ordered
+    }
+
+    private func callWithFallbackModels(
+        payload: [String: Any],
+        models: [String],
+        kind: String,
+        apiKey: String
+    ) throws -> OpenRouterCallResult {
+        var latestError: Error?
+        for model in models {
+            var modelPayload = payload
+            modelPayload["model"] = model
+            do {
+                return try call(payload: modelPayload, model: model, kind: kind, apiKey: apiKey)
+            } catch {
+                latestError = error
+            }
+        }
+
+        throw latestError ?? NSError(
+            domain: "OpenRouterClient",
+            code: 11,
+            userInfo: [NSLocalizedDescriptionKey: "No model available for \(kind)"]
+        )
     }
 
     private func call(payload: [String: Any], model: String, kind: String, apiKey: String) throws -> OpenRouterCallResult {
