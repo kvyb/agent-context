@@ -601,6 +601,8 @@ final class ActivityDashboardStore: ObservableObject {
         isSettingsPresented = false
         onCloseDashboard?()
 
+        terminateSiblingAppInstances()
+
         // Best-effort fast shutdown; quit should not block on pending analysis drains.
         runtime.stopTranscript()
         runtime.stopRecording(finalizePendingWork: false)
@@ -609,6 +611,21 @@ final class ActivityDashboardStore: ObservableObject {
 
     func closeDashboard() {
         onCloseDashboard?()
+    }
+
+    private func terminateSiblingAppInstances() {
+        guard let bundleID = Bundle.main.bundleIdentifier?.nilIfEmpty else {
+            return
+        }
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let siblings = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != currentPID }
+
+        for app in siblings {
+            if !app.terminate() {
+                _ = app.forceTerminate()
+            }
+        }
     }
 
     private func refreshWeekUsage() {

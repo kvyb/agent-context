@@ -178,5 +178,5 @@ echo "Update later with:"
 echo "  ${INSTALL_DIR}/scripts/update.sh --apply"
 
 if [[ "${LAUNCH_AFTER_INSTALL}" -eq 1 ]]; then
-  open -n "${APP_BUNDLE_PATH}"
+  open "${APP_BUNDLE_PATH}"
 fi
