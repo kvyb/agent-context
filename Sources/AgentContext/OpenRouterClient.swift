@@ -454,7 +454,13 @@ final class OpenRouterClient: @unchecked Sendable {
         return try call(payload: payload, model: model, kind: "synthesis_hour", apiKey: apiKey)
     }
 
-    func planMemoryQuery(question: String, now: Date, apiKey: String) throws -> OpenRouterCallResult {
+    func planMemoryQuery(
+        question: String,
+        now: Date,
+        detailLevel: MemoryQueryDetailLevel,
+        timeZone: TimeZone,
+        apiKey: String
+    ) throws -> OpenRouterCallResult {
         let model = textModel
         let systemPrompt = """
         You generate compact retrieval plans for a life-log memory store.
@@ -464,14 +470,21 @@ final class OpenRouterClient: @unchecked Sendable {
         - Keep user entities/nouns exactly as written when present.
         - Add aliases only when high-confidence and concise.
         - Avoid paraphrase explosion; do not output near-duplicate queries.
+        - detail_level must be either concise or detailed.
+        - Infer detail_level from user intent (detailed report/timeline/exhaustive requests => detailed).
         - timeframe must include start, end, label.
         - start/end: ISO8601 timestamp or empty string when not inferable.
         - label: short scope hint such as today/this week/last month, else empty string.
+        - If user provides explicit dates (for example 2026-03-10 to 2026-03-14), preserve those exact day boundaries in timeframe.
+        - Resolve relative dates using provided local time context and timezone.
+        - For detailed/timeline/report requests, produce query variants that maximize evidence recall across the requested period.
         - Never answer the user question here.
         """
 
         let userPrompt = """
-        Current time: \(iso8601(now))
+        Current UTC time: \(iso8601(now))
+        Current local time (\(timeZone.identifier)): \(localTimestamp(now, timeZone: timeZone))
+        Current retrieval mode hint (you may override): \(detailLevel.rawValue)
         User question: \(question)
         """
 
@@ -487,6 +500,10 @@ final class OpenRouterClient: @unchecked Sendable {
                     "schema": [
                         "type": "object",
                         "properties": [
+                            "detail_level": [
+                                "type": "string",
+                                "enum": ["concise", "detailed"]
+                            ],
                             "queries": [
                                 "type": "array",
                                 "items": ["type": "string"],
@@ -504,7 +521,7 @@ final class OpenRouterClient: @unchecked Sendable {
                                 "additionalProperties": false
                             ]
                         ],
-                        "required": ["queries", "timeframe"],
+                        "required": ["detail_level", "queries", "timeframe"],
                         "additionalProperties": false
                     ]
                 ]
@@ -520,7 +537,10 @@ final class OpenRouterClient: @unchecked Sendable {
 
     func answerMemoryQuery(
         question: String,
-        scopeLabel: String?,
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel,
+        now: Date,
+        timeZone: TimeZone,
         mem0EvidenceLines: [String],
         bm25EvidenceLines: [String],
         apiKey: String
@@ -535,16 +555,32 @@ final class OpenRouterClient: @unchecked Sendable {
         - Prefer facts that appear in both sources when possible.
         - If sources conflict, state the conflict explicitly and lower confidence.
         - answer should directly address the user's question.
-        - key_points: 2-8 factual bullets.
+        - key_points: factual bullets.
         - supporting_events: short event lines with timestamps/apps when available.
         - If evidence is weak or missing for parts of the question, set insufficient_evidence=true and state limits.
+        - Treat explicit dates as hard constraints.
+        - If detail level is detailed: provide chronological, specific event breakdown and avoid hand-wavy summary language.
+        - If detail level is detailed:
+          - answer must include a date/time ordered breakdown (oldest -> newest),
+          - include concrete actions, changes, outcomes, and open follow-ups,
+          - key_points should usually be 6-20 items,
+          - supporting_events should usually be 10-80 items when evidence exists.
+        - If detail level is concise:
+          - keep key_points around 2-8 and supporting_events around 2-12.
         """
 
-        let scopeText = scopeLabel?.nilIfEmpty ?? "unspecified"
+        let scopeText = scope.label?.nilIfEmpty ?? "unspecified"
+        let scopeStartText = scope.start.map(iso8601) ?? ""
+        let scopeEndText = scope.end.map(iso8601) ?? ""
         let mem0Text = mem0EvidenceLines.isEmpty ? "- none" : mem0EvidenceLines.joined(separator: "\n")
         let bm25Text = bm25EvidenceLines.isEmpty ? "- none" : bm25EvidenceLines.joined(separator: "\n")
         let userPrompt = """
+        Current UTC time: \(iso8601(now))
+        Current local time (\(timeZone.identifier)): \(localTimestamp(now, timeZone: timeZone))
+        Detail level: \(detailLevel.rawValue)
         Scope: \(scopeText)
+        Scope start: \(scopeStartText)
+        Scope end: \(scopeEndText)
         Question: \(question)
 
         MEM0_SEMANTIC evidence:
@@ -713,6 +749,14 @@ final class OpenRouterClient: @unchecked Sendable {
 
     private func iso8601(_ date: Date) -> String {
         ISO8601DateFormatter().string(from: date)
+    }
+
+    private func localTimestamp(_ date: Date, timeZone: TimeZone) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss ZZZZ"
+        return formatter.string(from: date)
     }
 
     private func webPDataForLLM(from imagePath: String) throws -> Data {

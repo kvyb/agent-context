@@ -18,7 +18,12 @@ final class OpenRouterMemoryQueryPlanner: MemoryQueryPlanning, @unchecked Sendab
         self.codec = codec
     }
 
-    func plan(question: String, now: Date) async -> MemoryQueryPlanResult? {
+    func plan(
+        question: String,
+        now: Date,
+        detailLevel: MemoryQueryDetailLevel,
+        timeZone: TimeZone
+    ) async -> MemoryQueryPlanResult? {
         guard let apiKey = apiKeyProvider()?.nilIfEmpty else {
             return nil
         }
@@ -27,7 +32,13 @@ final class OpenRouterMemoryQueryPlanner: MemoryQueryPlanning, @unchecked Sendab
         let client = OpenRouterClient(config: openRouterConfig, settings: settings)
 
         do {
-            let response = try client.planMemoryQuery(question: question, now: now, apiKey: apiKey)
+            let response = try client.planMemoryQuery(
+                question: question,
+                now: now,
+                detailLevel: detailLevel,
+                timeZone: timeZone,
+                apiKey: apiKey
+            )
             guard let plan = codec.parsePlan(from: response.text) else {
                 return nil
             }

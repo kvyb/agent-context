@@ -8,6 +8,10 @@ struct MemoryQueryScopeParser: Sendable {
     }
 
     func inferScope(for query: String, referenceDate: Date = Date()) -> MemoryQueryScope {
+        if let explicit = explicitDateScope(for: query, referenceDate: referenceDate) {
+            return explicit
+        }
+
         let lowered = query.lowercased()
         let todayStart = calendar.startOfDay(for: referenceDate)
 
@@ -63,6 +67,10 @@ struct MemoryQueryScopeParser: Sendable {
         }
 
         return MemoryQueryScope(start: nil, end: nil, label: nil)
+    }
+
+    func hasExplicitDate(in query: String) -> Bool {
+        explicitDateScope(for: query, referenceDate: Date()) != nil
     }
 
     func normalizedQueries(for question: String, plannerQueries: [String]) -> [String] {
@@ -122,5 +130,92 @@ struct MemoryQueryScopeParser: Sendable {
             delta += 7
         }
         return calendar.date(byAdding: .day, value: -delta, to: today)
+    }
+
+    private func explicitDateScope(for query: String, referenceDate: Date) -> MemoryQueryScope? {
+        let lowered = query.lowercased()
+        let parsedDates = extractExplicitDates(from: query)
+        guard !parsedDates.isEmpty else {
+            return nil
+        }
+
+        if parsedDates.count >= 2 {
+            let start = calendar.startOfDay(for: parsedDates[0])
+            let secondStart = calendar.startOfDay(for: parsedDates[1])
+            let orderedStart = min(start, secondStart)
+            let orderedEnd = max(start, secondStart)
+            let end = calendar.date(byAdding: .day, value: 1, to: orderedEnd)
+            let label = "from \(dayLabel(orderedStart)) to \(dayLabel(orderedEnd))"
+            return MemoryQueryScope(start: orderedStart, end: end, label: label)
+        }
+
+        guard let day = parsedDates.first else {
+            return nil
+        }
+
+        let dayStart = calendar.startOfDay(for: day)
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart)
+        else {
+            return nil
+        }
+
+        if lowered.contains("since"),
+           let end = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: referenceDate)) {
+            let label = "since \(dayLabel(dayStart))"
+            return MemoryQueryScope(start: dayStart, end: end, label: label)
+        }
+
+        let label = lowered.contains("on ") ? "on \(dayLabel(dayStart))" : dayLabel(dayStart)
+        return MemoryQueryScope(start: dayStart, end: dayEnd, label: label)
+    }
+
+    private func extractExplicitDates(from text: String) -> [Date] {
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        var results: [Date] = []
+        var seen = Set<Int>()
+
+        let patterns = [
+            #"\b(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b"#,
+            #"\b(0?[1-9]|1[0-2])\/(0?[1-9]|[12]\d|3[01])\/(20\d{2})\b"#,
+            #"\b(20\d{2})\/(0?[1-9]|1[0-2])\/(0?[1-9]|[12]\d|3[01])\b"#
+        ]
+
+        let formatters = [
+            dateFormatter("yyyy-MM-dd"),
+            dateFormatter("M/d/yyyy"),
+            dateFormatter("yyyy/M/d")
+        ]
+
+        for (index, pattern) in patterns.enumerated() {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let matches = regex.matches(in: text, options: [], range: fullRange)
+            for match in matches {
+                let raw = nsText.substring(with: match.range)
+                guard let date = formatters[index].date(from: raw) else { continue }
+                let dayKey = Int(calendar.startOfDay(for: date).timeIntervalSince1970 / 86_400)
+                if seen.insert(dayKey).inserted {
+                    results.append(date)
+                }
+            }
+        }
+
+        return results.sorted()
+    }
+
+    private func dayLabel(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private func dateFormatter(_ format: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = format
+        return formatter
     }
 }

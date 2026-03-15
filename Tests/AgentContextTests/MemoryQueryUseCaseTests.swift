@@ -70,7 +70,7 @@ final class MemoryQueryUseCaseTests: XCTestCase {
         XCTAssertEqual(result.bm25StoreCount, 1)
         XCTAssertEqual(result.scope.label, "this week")
         let usageCount = await usageWriter.eventCount()
-        XCTAssertEqual(usageCount, 2)
+        XCTAssertEqual(usageCount, 3)
     }
 
     func testUseCaseFallsBackWhenAnswererFails() async {
@@ -154,7 +154,12 @@ private final class FakePlanner: MemoryQueryPlanning, @unchecked Sendable {
         self.result = result
     }
 
-    func plan(question: String, now: Date) async -> MemoryQueryPlanResult? {
+    func plan(
+        question: String,
+        now: Date,
+        detailLevel: MemoryQueryDetailLevel,
+        timeZone: TimeZone
+    ) async -> MemoryQueryPlanResult? {
         result
     }
 }
@@ -168,7 +173,10 @@ private final class FakeAnswerer: MemoryQueryAnswering, @unchecked Sendable {
 
     func answer(
         question: String,
-        scopeLabel: String?,
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel,
+        now: Date,
+        timeZone: TimeZone,
         mem0Evidence: [MemoryEvidenceHit],
         bm25Evidence: [MemoryEvidenceHit]
     ) async -> MemoryQueryAnswerResult? {

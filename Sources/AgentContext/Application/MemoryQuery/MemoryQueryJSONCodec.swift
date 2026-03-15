@@ -20,9 +20,13 @@ struct MemoryQueryJSONCodec: Sendable {
             label = (object["scope_label"] as? String)?.nilIfEmpty
         }
 
+        let detailLevelRaw = (object["detail_level"] as? String)?.lowercased() ?? ""
+        let detailLevel = MemoryQueryDetailLevel(rawValue: detailLevelRaw) ?? .concise
+
         return MemoryQueryPlan(
             queries: queries.compactMap(\.nilIfEmpty),
-            scope: MemoryQueryScope(start: start, end: end, label: label)
+            scope: MemoryQueryScope(start: start, end: end, label: label),
+            detailLevel: detailLevel
         )
     }
 

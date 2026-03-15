@@ -20,7 +20,10 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
 
     func answer(
         question: String,
-        scopeLabel: String?,
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel,
+        now: Date,
+        timeZone: TimeZone,
         mem0Evidence: [MemoryEvidenceHit],
         bm25Evidence: [MemoryEvidenceHit]
     ) async -> MemoryQueryAnswerResult? {
@@ -31,13 +34,19 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
         let settings = settingsProvider()
         let client = OpenRouterClient(config: openRouterConfig, settings: settings)
 
-        let mem0Lines = mem0Evidence.prefix(24).map(formatEvidenceLine)
-        let bm25Lines = bm25Evidence.prefix(24).map(formatEvidenceLine)
+        let evidenceLimit = detailLevel == .detailed ? 60 : 24
+        let orderedMem0 = orderedEvidence(mem0Evidence, detailLevel: detailLevel)
+        let orderedBM25 = orderedEvidence(bm25Evidence, detailLevel: detailLevel)
+        let mem0Lines = orderedMem0.prefix(evidenceLimit).map(formatEvidenceLine)
+        let bm25Lines = orderedBM25.prefix(evidenceLimit).map(formatEvidenceLine)
 
         do {
             let response = try client.answerMemoryQuery(
                 question: question,
-                scopeLabel: scopeLabel,
+                scope: scope,
+                detailLevel: detailLevel,
+                now: now,
+                timeZone: timeZone,
                 mem0EvidenceLines: mem0Lines,
                 bm25EvidenceLines: bm25Lines,
                 apiKey: apiKey
@@ -60,5 +69,19 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
         let projectSuffix = project.isEmpty ? "" : " | project=\(project)"
         let score: Double = (hit.source == .mem0Semantic) ? hit.semanticScore : hit.lexicalScore
         return "[\(timestamp)] source=\(hit.source.rawValue) score=\(String(format: "%.2f", score)) app=\(app)\(projectSuffix) | memory=\(hit.text)"
+    }
+
+    private func orderedEvidence(
+        _ evidence: [MemoryEvidenceHit],
+        detailLevel: MemoryQueryDetailLevel
+    ) -> [MemoryEvidenceHit] {
+        evidence.sorted {
+            let left = $0.occurredAt ?? .distantPast
+            let right = $1.occurredAt ?? .distantPast
+            if detailLevel == .detailed {
+                return left < right
+            }
+            return left > right
+        }
     }
 }

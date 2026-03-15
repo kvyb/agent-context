@@ -5,6 +5,11 @@ enum MemoryQueryOutputFormat: String, Sendable {
     case json
 }
 
+enum MemoryQueryDetailLevel: String, Sendable {
+    case concise
+    case detailed
+}
+
 struct MemoryQueryRequest: Sendable {
     let question: String
     let outputFormat: MemoryQueryOutputFormat
@@ -37,6 +42,17 @@ struct MemoryEvidenceHit: Sendable {
 struct MemoryQueryPlan: Sendable {
     let queries: [String]
     let scope: MemoryQueryScope
+    let detailLevel: MemoryQueryDetailLevel
+
+    init(
+        queries: [String],
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel = .concise
+    ) {
+        self.queries = queries
+        self.scope = scope
+        self.detailLevel = detailLevel
+    }
 }
 
 struct MemoryQueryPlanResult: Sendable {
@@ -77,13 +93,21 @@ protocol LexicalMemoryRetrieving: Sendable {
 }
 
 protocol MemoryQueryPlanning: Sendable {
-    func plan(question: String, now: Date) async -> MemoryQueryPlanResult?
+    func plan(
+        question: String,
+        now: Date,
+        detailLevel: MemoryQueryDetailLevel,
+        timeZone: TimeZone
+    ) async -> MemoryQueryPlanResult?
 }
 
 protocol MemoryQueryAnswering: Sendable {
     func answer(
         question: String,
-        scopeLabel: String?,
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel,
+        now: Date,
+        timeZone: TimeZone,
         mem0Evidence: [MemoryEvidenceHit],
         bm25Evidence: [MemoryEvidenceHit]
     ) async -> MemoryQueryAnswerResult?
