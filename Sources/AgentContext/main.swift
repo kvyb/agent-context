@@ -60,7 +60,16 @@ private func runQueryMode(_ options: QueryCLIOptions) {
         let group = DispatchGroup()
         group.enter()
         Task {
-            let result = await QueryCLICommand.run(runtime: runtime, options: options)
+            let progressReporter: @Sendable (String) -> Void = { message in
+                guard let data = "[agent-context] \(message)\n".data(using: .utf8) else { return }
+                FileHandle.standardError.write(data)
+            }
+            let result = await runtime.runMemoryQuery(
+                options.query,
+                format: options.outputFormat,
+                options: options.requestOptions,
+                onProgress: progressReporter
+            )
             print(result)
             group.leave()
         }
@@ -108,15 +117,15 @@ private enum RootCLICommand {
         """
         Usage:
           \(programName) [--cli]
-          \(programName) query "<question>" [--json|--format text|json]
-          \(programName) --query "<question>" [--format text|json]
+          \(programName) query "<question>" [--json|--format text|json] [--source all|mem0|bm25] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS<=30]
+          \(programName) --query "<question>" [--format text|json] [--source all|mem0|bm25] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS<=30]
           \(programName) --set-user-aliases "<alias1,alias2,...>"
           \(programName) --help
           \(programName) --version
 
         Notes:
           - Run without flags to open the Agent Context menu bar app.
-          - Query commands return natural-language memory answers.
+          - Query commands return natural-language memory answers and stream progress to stderr.
         """
     }
 
