@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 final class RuntimeLog: @unchecked Sendable {
@@ -46,6 +47,7 @@ private struct CapturedProcessOutput: Sendable {
     let terminationStatus: Int32
     let stdout: String
     let stderr: String
+    let didTimeOut: Bool
 }
 
 private final class DataBox: @unchecked Sendable {
@@ -65,7 +67,11 @@ private final class DataBox: @unchecked Sendable {
     }
 }
 
-private func runProcessAndCapture(_ process: Process, stdin: Data?) throws -> CapturedProcessOutput {
+private func runProcessAndCapture(
+    _ process: Process,
+    stdin: Data?,
+    timeoutSeconds: TimeInterval? = nil
+) throws -> CapturedProcessOutput {
     let inputPipe = Pipe()
     let outputPipe = Pipe()
     let errorPipe = Pipe()
@@ -102,8 +108,33 @@ private func runProcessAndCapture(_ process: Process, stdin: Data?) throws -> Ca
     }
     try? inputPipe.fileHandleForWriting.close()
 
-    process.waitUntilExit()
-    drainGroup.wait()
+    let waitSemaphore = DispatchSemaphore(value: 0)
+    DispatchQueue.global(qos: .utility).async {
+        process.waitUntilExit()
+        waitSemaphore.signal()
+    }
+
+    let didTimeOut: Bool
+    if let timeoutSeconds {
+        let result = waitSemaphore.wait(timeout: .now() + timeoutSeconds)
+        didTimeOut = result == .timedOut
+        if didTimeOut {
+            if process.isRunning {
+                process.interrupt()
+            }
+            if process.isRunning {
+                process.terminate()
+            }
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
+            _ = waitSemaphore.wait(timeout: .now() + 2)
+        }
+    } else {
+        waitSemaphore.wait()
+        didTimeOut = false
+    }
+    _ = drainGroup.wait(timeout: .now() + 2)
 
     let outputText = String(data: outputBox.value(), encoding: .utf8)?
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -113,7 +144,8 @@ private func runProcessAndCapture(_ process: Process, stdin: Data?) throws -> Ca
     return CapturedProcessOutput(
         terminationStatus: process.terminationStatus,
         stdout: outputText,
-        stderr: errorText
+        stderr: errorText,
+        didTimeOut: didTimeOut
     )
 }
 
@@ -204,6 +236,7 @@ final class Mem0Searcher: @unchecked Sendable {
         start: Date?,
         end: Date?,
         limit: Int,
+        timeoutSeconds: TimeInterval?,
         settings: AppSettings
     ) -> [Mem0SearchHit] {
         guard settings.mem0Enabled else {
@@ -258,10 +291,20 @@ final class Mem0Searcher: @unchecked Sendable {
 
         let inputData = try? JSONSerialization.data(withJSONObject: input, options: [])
         let capture: CapturedProcessOutput
+        let startedAt = Date()
+        logger.info(
+            "Mem0 search started: query_count=\(normalizedQueries.count) limit=\(max(1, min(100, limit))) timeout=\(String(format: "%.1fs", timeoutSeconds ?? 0))"
+        )
         do {
-            capture = try runProcessAndCapture(process, stdin: inputData)
+            capture = try runProcessAndCapture(process, stdin: inputData, timeoutSeconds: timeoutSeconds)
         } catch {
             logger.error("Mem0 search launch failed: \(error.localizedDescription)")
+            return []
+        }
+
+        let duration = Date().timeIntervalSince(startedAt)
+        if capture.didTimeOut {
+            logger.error("Mem0 search timed out after \(String(format: "%.2fs", duration)); falling back to other sources.")
             return []
         }
 
@@ -278,8 +321,13 @@ final class Mem0Searcher: @unchecked Sendable {
               (object["status"] as? String) == "ok",
               let hits = object["hits"] as? [[String: Any]]
         else {
+            if !capture.stdout.isEmpty || !capture.stderr.isEmpty {
+                logger.error("Mem0 search returned unreadable output after \(String(format: "%.2fs", duration)).")
+            }
             return []
         }
+
+        logger.info("Mem0 search finished in \(String(format: "%.2fs", duration)) with \(hits.count) raw hits.")
 
         return hits.compactMap { hit in
             let metadataObject = hit["metadata"] as? [String: Any] ?? [:]
@@ -326,6 +374,7 @@ final class Mem0Searcher: @unchecked Sendable {
             start: start,
             end: end,
             limit: limit,
+            timeoutSeconds: nil,
             settings: settings
         )
     }
