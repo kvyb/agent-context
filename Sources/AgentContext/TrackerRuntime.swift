@@ -119,11 +119,13 @@ final class TrackerRuntime: @unchecked Sendable {
         retentionManager = ArtifactRetentionManager(database: database, logger: logger)
 
         let mem0Ingestor = Mem0Ingestor(
+            pythonExecutableURL: config.pythonExecutableURL,
             scriptURL: config.mem0ScriptURL,
             baseDirectory: config.baseDirectory,
             logger: logger
         )
         let mem0Searcher = Mem0Searcher(
+            pythonExecutableURL: config.pythonExecutableURL,
             scriptURL: config.mem0SearchScriptURL,
             baseDirectory: config.baseDirectory,
             logger: logger
@@ -240,6 +242,7 @@ final class TrackerRuntime: @unchecked Sendable {
             "openrouter models: multimodal=\(settings.openRouterModel) audio=\(settings.openRouterAudioModel) text=\(settings.openRouterTextModel) reasoning=\(config.openRouter.reasoningEffort)",
             "mem0 enabled: \(settings.mem0Enabled) ingest_script=\(config.mem0ScriptURL.path)",
             "mem0 search script: \(config.mem0SearchScriptURL.path)",
+            "python executable: \(config.pythonExecutableURL.path)",
             "track self-app: \(settings.includeSelfAppInTracking)"
         ]
     }

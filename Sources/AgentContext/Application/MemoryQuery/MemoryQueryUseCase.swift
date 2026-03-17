@@ -46,7 +46,7 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         let deadline = now.addingTimeInterval(effectiveOverallTimeout(for: request.options))
         let queryProfile = heuristicPlanner.profile(for: trimmed)
 
-        var detailLevel: MemoryQueryDetailLevel = .concise
+        var detailLevel: MemoryQueryDetailLevel = queryProfile.prefersDetailedAnswer ? .detailed : .concise
         var scope = fallbackScope
         var mem0Evidence: [MemoryEvidenceHit] = []
         var bm25Evidence: [MemoryEvidenceHit] = []
@@ -299,49 +299,89 @@ final class MemoryQueryUseCase: @unchecked Sendable {
             guard !phaseSteps.isEmpty else { continue }
             guard remainingSeconds(until: deadline) > 0 else { break }
 
-            request.onProgress?("Running \(phase.rawValue) retrieval with \(phaseSteps.count) step(s) in parallel...")
+            let semanticQueries = selectedSemanticQueries(
+                from: phaseSteps,
+                profile: profile,
+                detailLevel: detailLevel
+            )
+            let lexicalSteps = phaseSteps.filter { $0.sources.contains(.bm25Store) }
+            let semanticBatchSuffix = semanticQueries.isEmpty ? "" : "; batching \(semanticQueries.count) semantic quer\(semanticQueries.count == 1 ? "y" : "ies")"
+            request.onProgress?("Running \(phase.rawValue) retrieval with \(phaseSteps.count) step(s) in parallel\(semanticBatchSuffix)...")
 
-            let phaseOutput = await withTaskGroup(of: StepExecutionOutput.self) { group in
-                for step in phaseSteps {
+            async let semanticHits: [MemoryEvidenceHit] = executeSemanticBatch(
+                queries: semanticQueries,
+                scope: scope,
+                retrievalPlan: retrievalPlan,
+                deadline: deadline,
+                request: request,
+                profile: profile
+            )
+
+            let lexicalHits = await withTaskGroup(of: [MemoryEvidenceHit].self) { group in
+                for step in lexicalSteps {
                     group.addTask { [self] in
-                        await executeStep(
+                        await executeLexicalStep(
                             step,
                             scope: scope,
                             detailLevel: detailLevel,
                             retrievalPlan: retrievalPlan,
-                            deadline: deadline,
-                            request: request,
-                            profile: profile
+                            deadline: deadline
                         )
                     }
                 }
 
-                var output = StepExecutionOutput()
+                var hits: [MemoryEvidenceHit] = []
                 for await result in group {
-                    output.mem0Hits.append(contentsOf: result.mem0Hits)
-                    output.bm25Hits.append(contentsOf: result.bm25Hits)
+                    hits.append(contentsOf: result)
                 }
-                return output
+                return hits
             }
 
-            aggregatedMem0.append(contentsOf: phaseOutput.mem0Hits)
-            aggregatedBM25.append(contentsOf: phaseOutput.bm25Hits)
+            aggregatedMem0.append(contentsOf: await semanticHits)
+            aggregatedBM25.append(contentsOf: lexicalHits)
         }
 
         return StepExecutionOutput(mem0Hits: aggregatedMem0, bm25Hits: aggregatedBM25)
     }
 
-    private func executeStep(
-        _ step: MemoryQueryPlanStep,
+    private func executeSemanticBatch(
+        queries: [String],
         scope: MemoryQueryScope,
-        detailLevel: MemoryQueryDetailLevel,
         retrievalPlan: MemoryQueryRetrievalPlan,
         deadline: Date,
         request: MemoryQueryRequest,
         profile: QueryIntentProfile
-    ) async -> StepExecutionOutput {
+    ) async -> [MemoryEvidenceHit] {
+        guard !queries.isEmpty else {
+            return []
+        }
+
+        let timeout = stageBudget(
+            preferred: runtimeConfig.semanticSearchTimeoutSeconds,
+            deadline: deadline,
+            reserveSeconds: semanticReserveSeconds(request: request, profile: profile)
+        )
+        guard timeout >= 1 else {
+            return []
+        }
+
+        return await semanticRetriever.retrieve(
+            queries: queries,
+            scope: scope,
+            limit: max(1, retrievalPlan.perPassSemanticLimit),
+            timeoutSeconds: timeout
+        )
+    }
+
+    private func executeLexicalStep(
+        _ step: MemoryQueryPlanStep,
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel,
+        retrievalPlan: MemoryQueryRetrievalPlan,
+        deadline: Date
+    ) async -> [MemoryEvidenceHit] {
         guard remainingSeconds(until: deadline) > 0 else {
-            return StepExecutionOutput()
+            return []
         }
 
         let effectiveStepLimit = resolvedStepLimit(
@@ -351,37 +391,17 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         )
         let normalizedQuery = step.query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedQuery.isEmpty else {
-            return StepExecutionOutput()
+            return []
         }
 
-        async let mem0Hits: [MemoryEvidenceHit] = {
-            guard step.sources.contains(.mem0Semantic) else { return [] }
-            let timeout = stageBudget(
-                preferred: runtimeConfig.semanticSearchTimeoutSeconds,
-                deadline: deadline,
-                reserveSeconds: semanticReserveSeconds(request: request, profile: profile)
-            )
-            guard timeout >= 1 else { return [] }
-            return await semanticRetriever.retrieve(
-                queries: [normalizedQuery],
-                scope: scope,
-                limit: effectiveStepLimit,
-                timeoutSeconds: timeout
-            )
-        }()
+        guard step.sources.contains(.bm25Store) else {
+            return []
+        }
 
-        async let bm25Hits: [MemoryEvidenceHit] = {
-            guard step.sources.contains(.bm25Store) else { return [] }
-            return await lexicalRetriever.retrieve(
-                queries: [normalizedQuery],
-                scope: scope,
-                limit: effectiveStepLimit
-            )
-        }()
-
-        return await StepExecutionOutput(
-            mem0Hits: mem0Hits,
-            bm25Hits: bm25Hits
+        return await lexicalRetriever.retrieve(
+            queries: [normalizedQuery],
+            scope: scope,
+            limit: effectiveStepLimit
         )
     }
 
@@ -440,18 +460,65 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         return "\(step.phase.rawValue)|\(sources)|\(step.query.lowercased())"
     }
 
-    private func plannerReserveSeconds(request: MemoryQueryRequest, profile: QueryIntentProfile) -> TimeInterval {
-        if profile.prefersLexicalFirst {
-            return request.options.includesSemanticSearch && request.options.includesLexicalSearch ? 3 : 2
+    private func selectedSemanticQueries(
+        from steps: [MemoryQueryPlanStep],
+        profile: QueryIntentProfile,
+        detailLevel: MemoryQueryDetailLevel
+    ) -> [String] {
+        let maxQueries = semanticQueryCap(profile: profile, detailLevel: detailLevel)
+        guard maxQueries > 0 else {
+            return []
         }
-        return request.options.includesSemanticSearch || request.options.includesLexicalSearch ? 2 : 0
+
+        var seen = Set<String>()
+        var queries: [String] = []
+
+        for step in steps where step.sources.contains(.mem0Semantic) {
+            let normalized = step.query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else { continue }
+            let key = normalized.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            queries.append(normalized)
+            if queries.count >= maxQueries {
+                break
+            }
+        }
+
+        return queries
+    }
+
+    private func semanticQueryCap(
+        profile: QueryIntentProfile,
+        detailLevel: MemoryQueryDetailLevel
+    ) -> Int {
+        switch (profile.prefersLexicalFirst, detailLevel) {
+        case (true, .detailed):
+            return 3
+        case (true, .concise):
+            return 2
+        case (false, .detailed):
+            return 4
+        case (false, .concise):
+            return 3
+        }
+    }
+
+    private func plannerReserveSeconds(request: MemoryQueryRequest, profile: QueryIntentProfile) -> TimeInterval {
+        let detailedBuffer: TimeInterval = profile.prefersDetailedAnswer ? 1.5 : 0
+        if profile.prefersLexicalFirst {
+            let base: TimeInterval = request.options.includesSemanticSearch && request.options.includesLexicalSearch ? 3 : 2
+            return base + detailedBuffer
+        }
+        let base: TimeInterval = request.options.includesSemanticSearch || request.options.includesLexicalSearch ? 2 : 0
+        return base + detailedBuffer
     }
 
     private func semanticReserveSeconds(request: MemoryQueryRequest, profile: QueryIntentProfile) -> TimeInterval {
+        let detailedBuffer: TimeInterval = profile.prefersDetailedAnswer ? 0.75 : 0
         if profile.prefersLexicalFirst && request.options.includesLexicalSearch {
-            return 1.5
+            return 1.5 + detailedBuffer
         }
-        return request.options.includesLexicalSearch ? 1 : 0.5
+        return (request.options.includesLexicalSearch ? 1 : 0.5) + detailedBuffer
     }
 
     private func formattedSeconds(_ value: TimeInterval) -> String {

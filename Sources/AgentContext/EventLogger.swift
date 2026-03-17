@@ -67,6 +67,43 @@ private final class DataBox: @unchecked Sendable {
     }
 }
 
+private func normalizedMem0EnvironmentValue(_ value: String?) -> String? {
+    value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+}
+
+private func makeMem0ProcessEnvironment(
+    baseDirectory: URL,
+    settings: AppSettings,
+    baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
+) -> [String: String] {
+    var env = baseEnvironment
+    env["AGENT_CONTEXT_MEM0_USER_ID"] = settings.mem0UserID
+    env["AGENT_CONTEXT_MEM0_AGENT_ID"] = settings.mem0AgentID
+    env["AGENT_CONTEXT_MEM0_COLLECTION"] = settings.mem0Collection
+    env["AGENT_CONTEXT_MEM0_HISTORY_DB_PATH"] = baseDirectory
+        .appendingPathComponent("reports/mem0-history.sqlite").path
+    env["AGENT_CONTEXT_MEM0_QDRANT_PATH"] = baseDirectory
+        .appendingPathComponent("reports/mem0-qdrant").path
+    env["AGENT_CONTEXT_OPENROUTER_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1"
+
+    if let key = normalizedMem0EnvironmentValue(settings.openRouterAPIKey) {
+        env["AGENT_CONTEXT_OPENROUTER_API_KEY"] = key
+        env["OPENROUTER_API_KEY"] = key
+        env["OPENAI_API_KEY"] = key
+    }
+
+    if let model = normalizedMem0EnvironmentValue(settings.openRouterTextModel)
+        ?? normalizedMem0EnvironmentValue(settings.openRouterModel)
+        ?? normalizedMem0EnvironmentValue(env["AGENT_CONTEXT_OPENROUTER_TEXT_MODEL"])
+        ?? normalizedMem0EnvironmentValue(env["AGENT_CONTEXT_OPENROUTER_MODEL"]) {
+        env["AGENT_CONTEXT_MEM0_LLM_MODEL"] = model
+    }
+
+    env["OPENAI_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"]
+    env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] = env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] ?? "openai/text-embedding-3-small"
+    return env
+}
+
 private func runProcessAndCapture(
     _ process: Process,
     stdin: Data?,
@@ -150,11 +187,13 @@ private func runProcessAndCapture(
 }
 
 final class Mem0Ingestor: @unchecked Sendable {
+    private let pythonExecutableURL: URL
     private let scriptURL: URL
     private let baseDirectory: URL
     private let logger: RuntimeLog
 
-    init(scriptURL: URL, baseDirectory: URL, logger: RuntimeLog) {
+    init(pythonExecutableURL: URL, scriptURL: URL, baseDirectory: URL, logger: RuntimeLog) {
+        self.pythonExecutableURL = pythonExecutableURL
         self.scriptURL = scriptURL
         self.baseDirectory = baseDirectory
         self.logger = logger
@@ -170,33 +209,10 @@ final class Mem0Ingestor: @unchecked Sendable {
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.executableURL = pythonExecutableURL
         process.arguments = [scriptURL.path]
 
-        var env = ProcessInfo.processInfo.environment
-        env["AGENT_CONTEXT_MEM0_USER_ID"] = settings.mem0UserID
-        env["AGENT_CONTEXT_MEM0_AGENT_ID"] = settings.mem0AgentID
-        env["AGENT_CONTEXT_MEM0_COLLECTION"] = settings.mem0Collection
-        env["AGENT_CONTEXT_MEM0_HISTORY_DB_PATH"] = baseDirectory
-            .appendingPathComponent("reports/mem0-history.sqlite").path
-        env["AGENT_CONTEXT_MEM0_QDRANT_PATH"] = baseDirectory
-            .appendingPathComponent("reports/mem0-qdrant").path
-        env["AGENT_CONTEXT_OPENROUTER_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1"
-        if let key = normalized(settings.openRouterAPIKey) {
-            env["AGENT_CONTEXT_OPENROUTER_API_KEY"] = key
-            env["OPENROUTER_API_KEY"] = key
-            env["OPENAI_API_KEY"] = key
-        }
-        if let model = normalized(settings.openRouterTextModel)
-            ?? normalized(settings.openRouterModel)
-            ?? normalized(env["AGENT_CONTEXT_OPENROUTER_TEXT_MODEL"])
-            ?? normalized(env["AGENT_CONTEXT_OPENROUTER_MODEL"]) {
-            env["AGENT_CONTEXT_MEM0_LLM_MODEL"] = model
-        }
-        env["OPENAI_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"]
-        env["OPENAI_API_BASE"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"]
-        env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] = env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] ?? "openai/text-embedding-3-small"
-        process.environment = env
+        process.environment = makeMem0ProcessEnvironment(baseDirectory: baseDirectory, settings: settings)
 
         let inputData = try? JSONEncoder().encode(payload)
         let capture: CapturedProcessOutput
@@ -214,18 +230,16 @@ final class Mem0Ingestor: @unchecked Sendable {
         let errorJSON = "{\"stderr\":\"\((capture.stderr.nilIfEmpty ?? "unknown error").replacingOccurrences(of: "\"", with: "\\\""))\"}"
         return ("failed", capture.stdout.nilIfEmpty ?? errorJSON)
     }
-
-    private func normalized(_ value: String?) -> String? {
-        value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-    }
 }
 
 final class Mem0Searcher: @unchecked Sendable {
+    private let pythonExecutableURL: URL
     private let scriptURL: URL
     private let baseDirectory: URL
     private let logger: RuntimeLog
 
-    init(scriptURL: URL, baseDirectory: URL, logger: RuntimeLog) {
+    init(pythonExecutableURL: URL, scriptURL: URL, baseDirectory: URL, logger: RuntimeLog) {
+        self.pythonExecutableURL = pythonExecutableURL
         self.scriptURL = scriptURL
         self.baseDirectory = baseDirectory
         self.logger = logger
@@ -253,33 +267,10 @@ final class Mem0Searcher: @unchecked Sendable {
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.executableURL = pythonExecutableURL
         process.arguments = [scriptURL.path]
 
-        var env = ProcessInfo.processInfo.environment
-        env["AGENT_CONTEXT_MEM0_USER_ID"] = settings.mem0UserID
-        env["AGENT_CONTEXT_MEM0_AGENT_ID"] = settings.mem0AgentID
-        env["AGENT_CONTEXT_MEM0_COLLECTION"] = settings.mem0Collection
-        env["AGENT_CONTEXT_MEM0_HISTORY_DB_PATH"] = baseDirectory
-            .appendingPathComponent("reports/mem0-history.sqlite").path
-        env["AGENT_CONTEXT_MEM0_QDRANT_PATH"] = baseDirectory
-            .appendingPathComponent("reports/mem0-qdrant").path
-        env["AGENT_CONTEXT_OPENROUTER_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"] ?? "https://openrouter.ai/api/v1"
-        if let key = normalized(settings.openRouterAPIKey) {
-            env["AGENT_CONTEXT_OPENROUTER_API_KEY"] = key
-            env["OPENROUTER_API_KEY"] = key
-            env["OPENAI_API_KEY"] = key
-        }
-        if let model = normalized(settings.openRouterTextModel)
-            ?? normalized(settings.openRouterModel)
-            ?? normalized(env["AGENT_CONTEXT_OPENROUTER_TEXT_MODEL"])
-            ?? normalized(env["AGENT_CONTEXT_OPENROUTER_MODEL"]) {
-            env["AGENT_CONTEXT_MEM0_LLM_MODEL"] = model
-        }
-        env["OPENAI_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"]
-        env["OPENAI_API_BASE"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"]
-        env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] = env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] ?? "openai/text-embedding-3-small"
-        process.environment = env
+        process.environment = makeMem0ProcessEnvironment(baseDirectory: baseDirectory, settings: settings)
 
         let input: [String: Any] = [
             "queries": normalizedQueries,
@@ -293,7 +284,7 @@ final class Mem0Searcher: @unchecked Sendable {
         let capture: CapturedProcessOutput
         let startedAt = Date()
         logger.info(
-            "Mem0 search started: query_count=\(normalizedQueries.count) limit=\(max(1, min(100, limit))) timeout=\(String(format: "%.1fs", timeoutSeconds ?? 0))"
+            "Mem0 search started: query_count=\(normalizedQueries.count) limit=\(max(1, min(100, limit))) timeout=\(String(format: "%.1fs", timeoutSeconds ?? 0)) start=\(start.map { ISO8601DateFormatter().string(from: $0) } ?? "-") end=\(end.map { ISO8601DateFormatter().string(from: $0) } ?? "-")"
         )
         do {
             capture = try runProcessAndCapture(process, stdin: inputData, timeoutSeconds: timeoutSeconds)
@@ -378,16 +369,11 @@ final class Mem0Searcher: @unchecked Sendable {
             settings: settings
         )
     }
-
-    private func normalized(_ value: String?) -> String? {
-        value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-    }
-
     private func normalizeQueries(_ queries: [String]) -> [String] {
         var seen = Set<String>()
         var output: [String] = []
         for query in queries {
-            guard let normalizedQuery = normalized(query) else { continue }
+            guard let normalizedQuery = normalizedMem0EnvironmentValue(query) else { continue }
             let key = normalizedQuery.lowercased()
             guard seen.insert(key).inserted else { continue }
             output.append(normalizedQuery)

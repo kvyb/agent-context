@@ -47,6 +47,13 @@ final class TrackerConfigTests: XCTestCase {
         }
     }
 
+    func testPrefersExplicitPythonOverride() {
+        withEnvironment(["AGENT_CONTEXT_PYTHON": "/tmp/custom-python"]) {
+            let config = TrackerConfig.fromEnvironment()
+            XCTAssertEqual(config.pythonExecutableURL.path, "/tmp/custom-python")
+        }
+    }
+
     private func withEnvironment(_ values: [String: String], run body: () -> Void) {
         var previous: [String: String?] = [:]
         for (key, value) in values {

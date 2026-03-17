@@ -325,6 +325,43 @@ final class MemoryQueryUseCaseTests: XCTestCase {
         XCTAssertEqual(lexicalQueries, ["zoom interview"])
     }
 
+    func testUseCaseBatchesSemanticQueriesWithinPhase() async {
+        let semantic = FakeSemanticRetriever(hits: [sampleHit(id: "s1", source: .mem0Semantic, text: "semantic", score: 0.9)])
+        let lexical = FakeLexicalRetriever(hits: [])
+        let planner = FakePlanner(
+            result: MemoryQueryPlanResult(
+                plan: MemoryQueryPlan(
+                    steps: [
+                        MemoryQueryPlanStep(query: "manychat", sources: [.mem0Semantic], phase: .evidence, maxResults: 4),
+                        MemoryQueryPlanStep(query: "manychat tasks", sources: [.mem0Semantic], phase: .evidence, maxResults: 4),
+                        MemoryQueryPlanStep(query: "manychat blockers", sources: [.mem0Semantic], phase: .evidence, maxResults: 4)
+                    ],
+                    scope: MemoryQueryScope(start: nil, end: nil, label: nil),
+                    detailLevel: .detailed
+                ),
+                usage: nil
+            )
+        )
+        let useCase = MemoryQueryUseCase(
+            semanticRetriever: semantic,
+            lexicalRetriever: lexical,
+            planner: planner,
+            answerer: FakeAnswerer(result: nil),
+            usageWriter: FakeUsageWriter(),
+            scopeParser: MemoryQueryScopeParser(),
+            runtimeConfig: sampleRuntimeConfig()
+        )
+
+        _ = await useCase.execute(
+            request: MemoryQueryRequest(question: "summarize manychat work", outputFormat: .text)
+        )
+
+        let semanticCallCount = await semantic.timeoutCount()
+        let semanticQueries = await semantic.lastQueries()
+        XCTAssertEqual(semanticCallCount, 1)
+        XCTAssertEqual(semanticQueries, ["manychat", "manychat tasks", "manychat blockers"])
+    }
+
     private func sampleUsage(id: String) -> LLMUsageEvent {
         LLMUsageEvent(
             id: id,

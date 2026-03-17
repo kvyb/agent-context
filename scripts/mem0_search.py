@@ -1,54 +1,23 @@
 #!/usr/bin/env python3
-"""Mem0 semantic search bridge for About Time.
-
-Reads one JSON payload from stdin:
-{
-  "query": "...",                  # optional fallback
-  "queries": ["...", "..."],       # preferred
-  "start": "ISO8601 or empty",
-  "end": "ISO8601 or empty",
-  "limit": 20
-}
-
-Outputs:
-{
-  "status": "ok",
-  "hits": [...]
-}
-"""
+"""Mem0 semantic search bridge for About Time."""
 
 from __future__ import annotations
 
 import json
+import inspect
 import os
-import sys
-from datetime import datetime
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
-
-def load_input() -> dict[str, Any]:
-    raw = sys.stdin.read().strip()
-    if not raw:
-        raise ValueError("empty stdin payload")
-    payload = json.loads(raw)
-    if not isinstance(payload, dict):
-        raise ValueError("payload must be an object")
-    return payload
-
-
-def parse_iso(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    text = value.strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        return datetime.fromisoformat(text)
-    except Exception:
-        return None
+from mem0_common import (
+    build_mem0_config,
+    iso8601_utc,
+    load_payload,
+    parse_iso,
+    stringify_metadata_value,
+    unique_strings,
+    unix_timestamp,
+)
 
 
 def parse_queries(payload: dict[str, Any]) -> list[str]:
@@ -91,111 +60,166 @@ def parse_score(value: Any) -> float:
     return 0.0
 
 
-def build_mem0_config() -> dict[str, Any]:
-    collection = os.getenv("AGENT_CONTEXT_MEM0_COLLECTION", "agent_context_memories")
-    qdrant_path = os.getenv("AGENT_CONTEXT_MEM0_QDRANT_PATH", str(Path.home() / ".agent-context" / "reports" / "mem0-qdrant"))
-    history_db_path = os.getenv(
-        "AGENT_CONTEXT_MEM0_HISTORY_DB_PATH",
-        str(Path.home() / ".agent-context" / "reports" / "mem0-history.sqlite"),
-    )
-    openrouter_base_url = os.getenv("AGENT_CONTEXT_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-    llm_model = os.getenv("AGENT_CONTEXT_MEM0_LLM_MODEL", os.getenv("AGENT_CONTEXT_OPENROUTER_MODEL", "google/gemini-3.1-flash-lite-preview"))
-    embed_model = os.getenv("AGENT_CONTEXT_MEM0_EMBED_MODEL", "openai/text-embedding-3-small")
-    api_key = (
-        os.getenv("AGENT_CONTEXT_OPENROUTER_API_KEY")
-        or os.getenv("OPENROUTER_API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-    )
-
-    Path(qdrant_path).mkdir(parents=True, exist_ok=True)
-    Path(history_db_path).parent.mkdir(parents=True, exist_ok=True)
-
-    return {
-        "version": os.getenv("AGENT_CONTEXT_MEM0_VERSION", "v1.1"),
-        "history_db_path": history_db_path,
-        "vector_store": {
-            "provider": "qdrant",
-            "config": {
-                "path": qdrant_path,
-                "collection_name": collection,
-                "on_disk": True,
-            },
-        },
-        "llm": {
-            "provider": "openai",
-            "config": {
-                "api_key": api_key,
-                "model": llm_model,
-                "openai_base_url": openrouter_base_url,
-                "openrouter_base_url": openrouter_base_url,
-            },
-        },
-        "embedder": {
-            "provider": "openai",
-            "config": {
-                "api_key": api_key,
-                "model": embed_model,
-                "openai_base_url": openrouter_base_url,
-            },
-        },
-    }
-
-
-def call_search(memory, query: str, user_id: str, agent_id: str, limit: int) -> list[dict[str, Any]]:
-    attempts = [
-        lambda: memory.search(
-            query=query,
-            user_id=user_id,
-            agent_id=agent_id,
-            limit=limit,
-            keyword_search=True,
-            rerank=True,
-        ),
-        lambda: memory.search(
-            query=query,
-            user_id=user_id,
-            limit=limit,
-            keyword_search=True,
-            rerank=True,
-        ),
-        lambda: memory.search(
-            query=query,
-            user_id=user_id,
-            agent_id=agent_id,
-            limit=limit,
-            keyword_search=True,
-        ),
-        lambda: memory.search(
-            query=query,
-            user_id=user_id,
-            limit=limit,
-            keyword_search=True,
-        ),
-        lambda: memory.search(query, user_id=user_id, agent_id=agent_id, limit=limit),
-        lambda: memory.search(query=query, user_id=user_id, agent_id=agent_id, limit=limit),
-        lambda: memory.search(query, user_id=user_id, limit=limit),
-        lambda: memory.search(query=query, user_id=user_id, limit=limit),
-        lambda: memory.search(query, limit=limit),
-        lambda: memory.search(query=query, limit=limit),
-    ]
-
-    last_error = None
-    for attempt in attempts:
+def parse_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            return datetime.fromtimestamp(float(text), tz=timezone.utc)
         try:
-            raw = attempt()
-            if isinstance(raw, list):
-                return [row for row in raw if isinstance(row, dict)]
-            if isinstance(raw, dict):
-                results = raw.get("results")
-                if isinstance(results, list):
-                    return [row for row in results if isinstance(row, dict)]
-            return []
-        except Exception as exc:  # noqa: PERF203
-            last_error = exc
+            return datetime.fromtimestamp(float(text), tz=timezone.utc)
+        except Exception:
+            return parse_iso(text)
+    return None
 
-    if last_error:
+
+def extract_occurred_at(hit: dict[str, Any]) -> datetime | None:
+    direct_candidates = [
+        hit.get("occurred_at"),
+        hit.get("timestamp"),
+        hit.get("event_timestamp"),
+    ]
+    for candidate in direct_candidates:
+        parsed = parse_iso(candidate) if isinstance(candidate, str) else parse_timestamp(candidate)
+        if parsed is not None:
+            return parsed
+
+    metadata = hit.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+
+    for key in ["occurred_at", "event_timestamp", "timestamp"]:
+        candidate = metadata.get(key)
+        parsed = parse_iso(candidate) if isinstance(candidate, str) else parse_timestamp(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def build_search_filters(payload: dict[str, Any], start: datetime | None, end: datetime | None) -> dict[str, Any] | None:
+    clauses: list[dict[str, Any]] = []
+
+    time_filter: dict[str, Any] = {}
+    if start is not None:
+        time_filter["gte"] = unix_timestamp(start)
+    if end is not None:
+        time_filter["lt"] = unix_timestamp(end)
+    if time_filter:
+        clauses.append({"event_timestamp": time_filter})
+
+    for payload_key, filter_key in [
+        ("projects", "project"),
+        ("project", "project"),
+        ("app_names", "app_name"),
+        ("app_name", "app_name"),
+        ("scopes", "scope"),
+        ("scope", "scope"),
+        ("categories", "categories"),
+    ]:
+        raw_value = payload.get(payload_key)
+        values = unique_strings(raw_value if isinstance(raw_value, list) else [raw_value] if raw_value is not None else [])
+        if not values:
+            continue
+        if len(values) == 1:
+            clauses.append({filter_key: values[0]})
+        else:
+            clauses.append({filter_key: {"in": values}})
+
+    extra_filters = payload.get("filters")
+    if isinstance(extra_filters, dict) and extra_filters:
+        clauses.append(extra_filters)
+
+    if not clauses:
+        return None
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"AND": clauses}
+
+
+def search_attempts(memory, query: str, limit: int, scope_kwargs: dict[str, Any], filters: dict[str, Any] | None) -> list[dict[str, Any]]:
+    had_success = False
+    last_error = None
+    supported_parameters = set(inspect.signature(memory.search).parameters.keys())
+
+    option_sets: list[dict[str, Any]] = []
+    if filters:
+        option_sets.append({"filters": filters, "rerank": True})
+        option_sets.append({"filters": filters})
+    option_sets.append({"rerank": True})
+    option_sets.append({})
+
+    for extra_kwargs in option_sets:
+        merged_kwargs = {**scope_kwargs, "limit": limit, **extra_kwargs}
+        merged_kwargs = {
+            key: value for key, value in merged_kwargs.items()
+            if key in supported_parameters
+        }
+        attempts = [
+            lambda kwargs=merged_kwargs: memory.search(query=query, **kwargs),
+            lambda kwargs=merged_kwargs: memory.search(query, **kwargs),
+        ]
+        for attempt in attempts:
+            try:
+                raw = attempt()
+                had_success = True
+            except Exception as exc:  # noqa: PERF203
+                last_error = exc
+                continue
+
+            rows: list[dict[str, Any]]
+            if isinstance(raw, list):
+                rows = [row for row in raw if isinstance(row, dict)]
+            elif isinstance(raw, dict):
+                results = raw.get("results")
+                rows = [row for row in results if isinstance(row, dict)] if isinstance(results, list) else []
+            else:
+                rows = []
+
+            if rows:
+                return rows
+
+    if had_success:
+        return []
+    if last_error is not None:
         raise last_error
     return []
+
+
+def call_search(
+    memory,
+    query: str,
+    user_id: str,
+    agent_id: str,
+    limit: int,
+    filters: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    attempts: list[dict[str, Any]] = []
+    if user_id and agent_id:
+        attempts.append({"user_id": user_id, "agent_id": agent_id})
+    if user_id:
+        attempts.append({"user_id": user_id})
+    if agent_id:
+        attempts.append({"agent_id": agent_id})
+    if not attempts:
+        attempts.append({})
+
+    seen: set[str] = set()
+    collected: list[dict[str, Any]] = []
+    for scope_kwargs in attempts:
+        key = json.dumps(scope_kwargs, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows = search_attempts(memory, query=query, limit=limit, scope_kwargs=scope_kwargs, filters=filters)
+        if not rows:
+            continue
+        collected.extend(rows)
+        if len(collected) >= limit:
+            break
+    return collected
 
 
 def normalize_hit(raw: dict[str, Any], retrieved_query: str, query_rank: int) -> dict[str, Any]:
@@ -204,13 +228,23 @@ def normalize_hit(raw: dict[str, Any], retrieved_query: str, query_rank: int) ->
     if not isinstance(memory_text, str):
         memory_text = str(memory_text)
 
-    app_name = raw.get("app_name") or metadata.get("app_name")
-    project = raw.get("project") or metadata.get("project")
-    occurred_at = raw.get("occurred_at") or metadata.get("occurred_at")
-
-    normalized_metadata = {k: str(v) for k, v in metadata.items()}
+    normalized_metadata: dict[str, str] = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str):
+            continue
+        rendered = stringify_metadata_value(value)
+        if rendered:
+            normalized_metadata[key] = rendered
     normalized_metadata["retrieved_query"] = retrieved_query
     normalized_metadata["query_rank"] = str(query_rank)
+
+    occurred_at = extract_occurred_at(raw)
+    occurred_at_text = iso8601_utc(occurred_at)
+    if occurred_at_text:
+        normalized_metadata.setdefault("occurred_at", occurred_at_text)
+
+    app_name = raw.get("app_name") or metadata.get("app_name")
+    project = raw.get("project") or metadata.get("project")
 
     return {
         "id": raw.get("id"),
@@ -218,7 +252,7 @@ def normalize_hit(raw: dict[str, Any], retrieved_query: str, query_rank: int) ->
         "memory": memory_text.strip(),
         "app_name": app_name if isinstance(app_name, str) else None,
         "project": project if isinstance(project, str) else None,
-        "occurred_at": occurred_at if isinstance(occurred_at, str) else None,
+        "occurred_at": occurred_at_text,
         "metadata": normalized_metadata,
     }
 
@@ -229,10 +263,8 @@ def filter_hits_by_time(hits: list[dict[str, Any]], start: datetime | None, end:
 
     filtered: list[dict[str, Any]] = []
     for hit in hits:
-        occurred_raw = hit.get("occurred_at")
-        occurred = parse_iso(occurred_raw if isinstance(occurred_raw, str) else None)
+        occurred = extract_occurred_at(hit)
         if occurred is None:
-            filtered.append(hit)
             continue
 
         if start and occurred < start:
@@ -278,13 +310,8 @@ def dedupe_and_sort_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return 99
 
     def occurred_ts(hit: dict[str, Any]) -> float:
-        raw = hit.get("occurred_at")
-        if not isinstance(raw, str):
-            return 0.0
-        parsed = parse_iso(raw)
-        if parsed is None:
-            return 0.0
-        return parsed.timestamp()
+        occurred = extract_occurred_at(hit)
+        return occurred.timestamp() if occurred is not None else 0.0
 
     return sorted(
         best.values(),
@@ -293,7 +320,7 @@ def dedupe_and_sort_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def main() -> int:
-    payload = load_input()
+    payload = load_payload()
     queries = parse_queries(payload)
     if not queries:
         print(json.dumps({"status": "ok", "hits": []}))
@@ -339,10 +366,19 @@ def main() -> int:
             )
             return 1
 
+    filters = build_search_filters(payload, start=start, end=end)
+
     collected: list[dict[str, Any]] = []
     for index, query in enumerate(queries):
         try:
-            raw_hits = call_search(memory, query=query, user_id=user_id, agent_id=agent_id, limit=limit)
+            raw_hits = call_search(
+                memory,
+                query=query,
+                user_id=user_id,
+                agent_id=agent_id,
+                limit=limit,
+                filters=filters,
+            )
         except Exception as exc:
             print(json.dumps({"status": "error", "error": f"mem0 search failed for query '{query}': {exc}"}))
             return 1

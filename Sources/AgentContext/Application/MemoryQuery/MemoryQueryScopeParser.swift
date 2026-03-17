@@ -85,9 +85,27 @@ struct MemoryQueryScopeParser: Sendable {
             "what", "did", "do", "i", "in", "on", "at", "the", "a", "an", "for", "to",
             "of", "from", "and", "or", "my", "was", "were", "is", "are", "this", "that",
             "with", "during", "show", "me", "about", "when", "where", "how", "status",
-            "week", "today", "yesterday", "month"
+            "find",
+            "week", "today", "yesterday", "month", "user", "between", "main", "many"
         ]
-        return tokenize(text).filter { !stopWords.contains($0) }
+        let monthTokens: Set<String> = [
+            "jan", "january", "feb", "february", "mar", "march", "apr", "april", "may",
+            "jun", "june", "jul", "july", "aug", "august", "sep", "sept", "september",
+            "oct", "october", "nov", "november", "dec", "december"
+        ]
+
+        return tokenize(text).filter { token in
+            guard !stopWords.contains(token) else { return false }
+            guard !monthTokens.contains(token) else { return false }
+            guard !token.allSatisfy(\.isNumber) else { return false }
+            if token.hasSuffix("st") || token.hasSuffix("nd") || token.hasSuffix("rd") || token.hasSuffix("th") {
+                let prefix = token.dropLast(2)
+                if !prefix.isEmpty, prefix.allSatisfy(\.isNumber) {
+                    return false
+                }
+            }
+            return true
+        }
     }
 
     private func weekStart(containing date: Date) -> Date? {

@@ -21,6 +21,7 @@ struct TrackerConfig: Sendable {
     let audioDirectory: URL
     let databaseURL: URL
     let retryJournalURL: URL
+    let pythonExecutableURL: URL
     let mem0ScriptURL: URL
     let mem0SearchScriptURL: URL
 
@@ -55,23 +56,28 @@ struct TrackerConfig: Sendable {
         let reportsDirectory = baseDirectory.appendingPathComponent("reports", isDirectory: true)
         let databaseURL = reportsDirectory.appendingPathComponent("activity.sqlite")
         let retryJournalURL = reportsDirectory.appendingPathComponent("retry-journal.json")
+        let projectDirectory = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
 
         let bundledMem0Script = Bundle.main.resourceURL?
             .appendingPathComponent("mem0_ingest.py")
-        let projectMem0Script = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
-            .appendingPathComponent("scripts/mem0_ingest.py")
+        let projectMem0Script = projectDirectory.appendingPathComponent("scripts/mem0_ingest.py")
         let defaultMem0Script = (bundledMem0Script.flatMap {
             fileManager.fileExists(atPath: $0.path) ? $0 : nil
         }) ?? projectMem0Script
         let mem0ScriptURL = URL(fileURLWithPath: env["AGENT_CONTEXT_MEM0_SCRIPT"]?.nilIfEmpty ?? defaultMem0Script.path)
         let bundledMem0SearchScript = Bundle.main.resourceURL?
             .appendingPathComponent("mem0_search.py")
-        let projectMem0SearchScript = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
-            .appendingPathComponent("scripts/mem0_search.py")
+        let projectMem0SearchScript = projectDirectory.appendingPathComponent("scripts/mem0_search.py")
         let defaultMem0SearchScript = (bundledMem0SearchScript.flatMap {
             fileManager.fileExists(atPath: $0.path) ? $0 : nil
         }) ?? projectMem0SearchScript
         let mem0SearchScriptURL = URL(fileURLWithPath: env["AGENT_CONTEXT_MEM0_SEARCH_SCRIPT"]?.nilIfEmpty ?? defaultMem0SearchScript.path)
+        let pythonExecutableURL = resolvePythonExecutable(
+            env: env,
+            fileManager: fileManager,
+            projectDirectory: projectDirectory,
+            mem0ScriptURL: mem0ScriptURL
+        )
 
         let openRouterEndpoint = URL(string: env["AGENT_CONTEXT_OPENROUTER_ENDPOINT"] ?? "https://openrouter.ai/api/v1/chat/completions")
             ?? URL(string: "https://openrouter.ai/api/v1/chat/completions")!
@@ -96,6 +102,7 @@ struct TrackerConfig: Sendable {
             audioDirectory: audioDirectory,
             databaseURL: databaseURL,
             retryJournalURL: retryJournalURL,
+            pythonExecutableURL: pythonExecutableURL,
             mem0ScriptURL: mem0ScriptURL,
             mem0SearchScriptURL: mem0SearchScriptURL,
             screenshotActivationDelaySeconds: max(1, TimeInterval(env["AGENT_CONTEXT_SCREENSHOT_AFTER_ACTIVATION_SECONDS"].flatMap(Double.init) ?? 3)),
@@ -111,4 +118,27 @@ struct TrackerConfig: Sendable {
             memoryQuery: memoryQuery
         )
     }
+}
+
+private func resolvePythonExecutable(
+    env: [String: String],
+    fileManager: FileManager,
+    projectDirectory: URL,
+    mem0ScriptURL: URL
+) -> URL {
+    if let configured = env["AGENT_CONTEXT_PYTHON"]?.nilIfEmpty {
+        return URL(fileURLWithPath: configured)
+    }
+
+    let scriptRoot = mem0ScriptURL.deletingLastPathComponent().deletingLastPathComponent()
+    let candidates = [
+        projectDirectory.appendingPathComponent(".venv/bin/python3"),
+        projectDirectory.appendingPathComponent(".venv/bin/python"),
+        scriptRoot.appendingPathComponent(".venv/bin/python3"),
+        scriptRoot.appendingPathComponent(".venv/bin/python"),
+        URL(fileURLWithPath: "/usr/bin/python3")
+    ]
+
+    return candidates.first { fileManager.isExecutableFile(atPath: $0.path) }
+        ?? URL(fileURLWithPath: "/usr/bin/python3")
 }

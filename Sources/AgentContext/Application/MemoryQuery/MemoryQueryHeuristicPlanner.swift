@@ -2,6 +2,8 @@ import Foundation
 
 struct QueryIntentProfile: Sendable {
     let prefersLexicalFirst: Bool
+    let prefersDetailedAnswer: Bool
+    let requestedFacets: [String]
 }
 
 struct MemoryQueryHeuristicPlanner: Sendable {
@@ -15,7 +17,27 @@ struct MemoryQueryHeuristicPlanner: Sendable {
         let lowered = question.lowercased()
         let transcriptLikeTerms = ["transcript", "interview", "meeting", "zoom", "call", "candidate", "notetaker"]
         let prefersLexicalFirst = transcriptLikeTerms.contains { lowered.contains($0) }
-        return QueryIntentProfile(prefersLexicalFirst: prefersLexicalFirst)
+
+        let detailedTerms = [
+            "timeline",
+            "projects",
+            "tasks",
+            "takeaways",
+            "struggles",
+            "blockers",
+            "everything",
+            "comprehensive",
+            "summarize",
+            "summary"
+        ]
+        let prefersDetailedAnswer = scopeParser.hasExplicitDate(in: question)
+            || detailedTerms.contains { lowered.contains($0) }
+
+        return QueryIntentProfile(
+            prefersLexicalFirst: prefersLexicalFirst,
+            prefersDetailedAnswer: prefersDetailedAnswer,
+            requestedFacets: requestedFacets(for: lowered)
+        )
     }
 
     func fallbackPlanResult(
@@ -38,7 +60,7 @@ struct MemoryQueryHeuristicPlanner: Sendable {
             plan: MemoryQueryPlan(
                 steps: steps,
                 scope: fallbackScope,
-                detailLevel: detailLevel
+                detailLevel: queryProfile.prefersDetailedAnswer ? .detailed : detailLevel
             ),
             usage: nil
         )
@@ -49,25 +71,29 @@ struct MemoryQueryHeuristicPlanner: Sendable {
         requestOptions: MemoryQueryOptions,
         profile: QueryIntentProfile
     ) -> [MemoryQueryPlanStep] {
-        let plannedQueries = plannerQueries(for: question)
+        let plannedQueries = plannerQueries(for: question, profile: profile)
         let queries = plannedQueries.isEmpty ? [question] : plannedQueries
 
         var steps: [MemoryQueryPlanStep] = []
+        let researchLimit = profile.prefersDetailedAnswer ? 8 : 6
+        let evidenceLimit = profile.prefersDetailedAnswer ? 8 : (profile.prefersLexicalFirst ? 6 : 5)
+        let researchCount = profile.prefersDetailedAnswer ? 3 : 2
+        let evidenceCount = profile.prefersDetailedAnswer ? 6 : 4
 
         if profile.prefersLexicalFirst && requestOptions.includesLexicalSearch {
-            for query in queries.prefix(2) {
+            for query in queries.prefix(researchCount) {
                 steps.append(
                     MemoryQueryPlanStep(
                         query: query,
                         sources: [.bm25Store],
                         phase: .research,
-                        maxResults: 6
+                        maxResults: researchLimit
                     )
                 )
             }
         }
 
-        for query in queries.prefix(4) {
+        for query in queries.prefix(evidenceCount) {
             var sources = requestOptions.sources
             if profile.prefersLexicalFirst && requestOptions.includesLexicalSearch {
                 sources.insert(.bm25Store)
@@ -78,7 +104,7 @@ struct MemoryQueryHeuristicPlanner: Sendable {
                     query: query,
                     sources: sources,
                     phase: .evidence,
-                    maxResults: profile.prefersLexicalFirst ? 6 : 5
+                    maxResults: evidenceLimit
                 )
             )
         }
@@ -86,7 +112,7 @@ struct MemoryQueryHeuristicPlanner: Sendable {
         return steps
     }
 
-    private func plannerQueries(for question: String) -> [String] {
+    private func plannerQueries(for question: String, profile: QueryIntentProfile) -> [String] {
         let normalizedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
         let tokens = scopeParser.queryTerms(for: normalizedQuestion)
         guard !tokens.isEmpty else {
@@ -101,6 +127,16 @@ struct MemoryQueryHeuristicPlanner: Sendable {
             let key = value.lowercased()
             guard seen.insert(key).inserted else { return }
             queries.append(value)
+        }
+
+        let anchorTokens = anchorTokens(from: tokens)
+        let anchorQuery = Array(anchorTokens.prefix(profile.prefersDetailedAnswer ? 3 : 2)).joined(separator: " ")
+        add(anchorQuery)
+
+        if profile.prefersDetailedAnswer {
+            for facet in profile.requestedFacets {
+                add([anchorQuery, facet].filter { !$0.isEmpty }.joined(separator: " "))
+            }
         }
 
         let significantTokens = Array(tokens.prefix(6))
@@ -129,6 +165,33 @@ struct MemoryQueryHeuristicPlanner: Sendable {
             add("zoom interview")
         }
 
-        return Array(queries.prefix(6))
+        return Array(queries.prefix(profile.prefersDetailedAnswer ? 8 : 6))
+    }
+
+    private func requestedFacets(for loweredQuestion: String) -> [String] {
+        var facets: [String] = []
+        if loweredQuestion.contains("project") {
+            facets.append("projects")
+        }
+        if loweredQuestion.contains("task") {
+            facets.append("tasks")
+        }
+        if loweredQuestion.contains("takeaway") || loweredQuestion.contains("learning") {
+            facets.append("takeaways")
+        }
+        if loweredQuestion.contains("struggle") || loweredQuestion.contains("blocker") || loweredQuestion.contains("problem") {
+            facets.append("blockers")
+        }
+        return facets
+    }
+
+    private func anchorTokens(from tokens: [String]) -> [String] {
+        let facetTokens: Set<String> = [
+            "project", "projects", "task", "tasks", "takeaway", "takeaways",
+            "learning", "learnings", "struggle", "struggles", "blocker", "blockers",
+            "problem", "problems", "summary", "summarize", "timeline"
+        ]
+        let filtered = tokens.filter { !facetTokens.contains($0) }
+        return filtered.isEmpty ? tokens : filtered
     }
 }
