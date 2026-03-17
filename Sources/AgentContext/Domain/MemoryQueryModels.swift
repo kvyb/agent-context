@@ -10,9 +10,50 @@ enum MemoryQueryDetailLevel: String, Sendable {
     case detailed
 }
 
+enum MemoryQueryStepPhase: String, Sendable, Codable {
+    case research
+    case evidence
+}
+
+struct MemoryQueryOptions: Sendable {
+    let sources: Set<MemoryEvidenceSource>
+    let scopeOverride: MemoryQueryScope?
+    let maxResults: Int?
+    let timeoutSeconds: TimeInterval?
+
+    static let `default` = MemoryQueryOptions(
+        sources: Set(MemoryEvidenceSource.allCases),
+        scopeOverride: nil,
+        maxResults: nil,
+        timeoutSeconds: nil
+    )
+
+    var includesSemanticSearch: Bool {
+        sources.contains(.mem0Semantic)
+    }
+
+    var includesLexicalSearch: Bool {
+        sources.contains(.bm25Store)
+    }
+}
+
 struct MemoryQueryRequest: Sendable {
     let question: String
     let outputFormat: MemoryQueryOutputFormat
+    let options: MemoryQueryOptions
+    let onProgress: (@Sendable (String) -> Void)?
+
+    init(
+        question: String,
+        outputFormat: MemoryQueryOutputFormat,
+        options: MemoryQueryOptions = .default,
+        onProgress: (@Sendable (String) -> Void)? = nil
+    ) {
+        self.question = question
+        self.outputFormat = outputFormat
+        self.options = options
+        self.onProgress = onProgress
+    }
 }
 
 struct MemoryQueryScope: Sendable, Codable {
@@ -21,9 +62,20 @@ struct MemoryQueryScope: Sendable, Codable {
     let label: String?
 }
 
-enum MemoryEvidenceSource: String, Codable, Sendable {
+enum MemoryEvidenceSource: String, Codable, Sendable, CaseIterable, Hashable {
     case mem0Semantic = "mem0_semantic"
     case bm25Store = "bm25_store"
+
+    init?(cliValue raw: String) {
+        switch raw.lowercased() {
+        case "mem0", "semantic", "mem0_semantic":
+            self = .mem0Semantic
+        case "bm25", "lexical", "bm25_store":
+            self = .bm25Store
+        default:
+            return nil
+        }
+    }
 }
 
 struct MemoryEvidenceHit: Sendable {
@@ -39,8 +91,27 @@ struct MemoryEvidenceHit: Sendable {
     let hybridScore: Double
 }
 
+struct MemoryQueryPlanStep: Sendable {
+    let query: String
+    let sources: Set<MemoryEvidenceSource>
+    let phase: MemoryQueryStepPhase
+    let maxResults: Int?
+
+    init(
+        query: String,
+        sources: Set<MemoryEvidenceSource> = Set(MemoryEvidenceSource.allCases),
+        phase: MemoryQueryStepPhase = .evidence,
+        maxResults: Int? = nil
+    ) {
+        self.query = query
+        self.sources = sources.isEmpty ? Set(MemoryEvidenceSource.allCases) : sources
+        self.phase = phase
+        self.maxResults = maxResults
+    }
+}
+
 struct MemoryQueryPlan: Sendable {
-    let queries: [String]
+    let steps: [MemoryQueryPlanStep]
     let scope: MemoryQueryScope
     let detailLevel: MemoryQueryDetailLevel
 
@@ -49,9 +120,34 @@ struct MemoryQueryPlan: Sendable {
         scope: MemoryQueryScope,
         detailLevel: MemoryQueryDetailLevel = .concise
     ) {
-        self.queries = queries
+        self.steps = queries.compactMap { query in
+            guard let normalized = query.nilIfEmpty else { return nil }
+            return MemoryQueryPlanStep(query: normalized)
+        }
         self.scope = scope
         self.detailLevel = detailLevel
+    }
+
+    init(
+        steps: [MemoryQueryPlanStep],
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel = .concise
+    ) {
+        self.steps = steps.compactMap { step in
+            guard let normalized = step.query.nilIfEmpty else { return nil }
+            return MemoryQueryPlanStep(
+                query: normalized,
+                sources: step.sources,
+                phase: step.phase,
+                maxResults: step.maxResults
+            )
+        }
+        self.scope = scope
+        self.detailLevel = detailLevel
+    }
+
+    var queries: [String] {
+        steps.map(\.query)
     }
 }
 
@@ -85,7 +181,12 @@ struct MemoryQueryResult: Sendable {
 }
 
 protocol SemanticMemoryRetrieving: Sendable {
-    func retrieve(queries: [String], scope: MemoryQueryScope, limit: Int) async -> [MemoryEvidenceHit]
+    func retrieve(
+        queries: [String],
+        scope: MemoryQueryScope,
+        limit: Int,
+        timeoutSeconds: TimeInterval?
+    ) async -> [MemoryEvidenceHit]
 }
 
 protocol LexicalMemoryRetrieving: Sendable {
@@ -97,7 +198,8 @@ protocol MemoryQueryPlanning: Sendable {
         question: String,
         now: Date,
         detailLevel: MemoryQueryDetailLevel,
-        timeZone: TimeZone
+        timeZone: TimeZone,
+        timeoutSeconds: TimeInterval
     ) async -> MemoryQueryPlanResult?
 }
 
@@ -109,7 +211,8 @@ protocol MemoryQueryAnswering: Sendable {
         now: Date,
         timeZone: TimeZone,
         mem0Evidence: [MemoryEvidenceHit],
-        bm25Evidence: [MemoryEvidenceHit]
+        bm25Evidence: [MemoryEvidenceHit],
+        timeoutSeconds: TimeInterval
     ) async -> MemoryQueryAnswerResult?
 }
 

@@ -7,6 +7,13 @@ struct OpenRouterRuntimeConfig: Sendable {
     let timeoutSeconds: TimeInterval
 }
 
+struct MemoryQueryRuntimeConfig: Sendable {
+    let timeoutSeconds: TimeInterval
+    let plannerTimeoutSeconds: TimeInterval
+    let answerTimeoutSeconds: TimeInterval
+    let semanticSearchTimeoutSeconds: TimeInterval
+}
+
 struct TrackerConfig: Sendable {
     let environment: [String: String]
     let baseDirectory: URL
@@ -29,6 +36,7 @@ struct TrackerConfig: Sendable {
     let shutdownDrainTimeoutSeconds: TimeInterval
 
     let openRouter: OpenRouterRuntimeConfig
+    let memoryQuery: MemoryQueryRuntimeConfig
 
     static func fromEnvironment() -> TrackerConfig {
         let env = runtimeEnvironment()
@@ -74,6 +82,12 @@ struct TrackerConfig: Sendable {
             reasoningEffort: env["AGENT_CONTEXT_OPENROUTER_REASONING_EFFORT"]?.nilIfEmpty ?? "medium",
             timeoutSeconds: max(15, TimeInterval(env["AGENT_CONTEXT_OPENROUTER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 90))
         )
+        let memoryQuery = MemoryQueryRuntimeConfig(
+            timeoutSeconds: min(30, max(5, TimeInterval(env["AGENT_CONTEXT_MEMORY_QUERY_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 20))),
+            plannerTimeoutSeconds: min(12, max(2, TimeInterval(env["AGENT_CONTEXT_MEMORY_QUERY_PLANNER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 6))),
+            answerTimeoutSeconds: min(12, max(2, TimeInterval(env["AGENT_CONTEXT_MEMORY_QUERY_ANSWER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 6))),
+            semanticSearchTimeoutSeconds: min(10, max(2, TimeInterval(env["AGENT_CONTEXT_MEM0_SEARCH_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 6)))
+        )
 
         return TrackerConfig(
             environment: env,
@@ -93,7 +107,8 @@ struct TrackerConfig: Sendable {
             maxRetryAttempts: min(12, max(2, env["AGENT_CONTEXT_MAX_RETRY_ATTEMPTS"].flatMap(Int.init) ?? 6)),
             retryBaseDelaySeconds: min(600, max(5, TimeInterval(env["AGENT_CONTEXT_RETRY_BASE_DELAY_SECONDS"].flatMap(Double.init) ?? 15))),
             shutdownDrainTimeoutSeconds: min(120, max(5, TimeInterval(env["AGENT_CONTEXT_SHUTDOWN_DRAIN_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 30))),
-            openRouter: openRouter
+            openRouter: openRouter,
+            memoryQuery: memoryQuery
         )
     }
 }

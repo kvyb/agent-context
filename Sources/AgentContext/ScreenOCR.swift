@@ -1,8 +1,6 @@
 import Foundation
 
 final class MemoryQueryService: @unchecked Sendable {
-    private let settingsProvider: @Sendable () -> AppSettings
-    private let apiKeyProvider: @Sendable () -> String?
     private let formatter: MemoryQueryFormatter
     private let useCase: MemoryQueryUseCase
 
@@ -11,11 +9,9 @@ final class MemoryQueryService: @unchecked Sendable {
         mem0Searcher: Mem0Searcher,
         settingsProvider: @escaping @Sendable () -> AppSettings,
         apiKeyProvider: @escaping @Sendable () -> String?,
-        openRouterConfig: OpenRouterRuntimeConfig
+        openRouterConfig: OpenRouterRuntimeConfig,
+        runtimeConfig: MemoryQueryRuntimeConfig
     ) {
-        self.settingsProvider = settingsProvider
-        self.apiKeyProvider = apiKeyProvider
-
         let codec = MemoryQueryJSONCodec()
         let scopeParser = MemoryQueryScopeParser()
         let ranker = BM25Ranker()
@@ -49,7 +45,8 @@ final class MemoryQueryService: @unchecked Sendable {
             planner: planner,
             answerer: answerer,
             usageWriter: usageWriter,
-            scopeParser: scopeParser
+            scopeParser: scopeParser,
+            runtimeConfig: runtimeConfig
         )
         formatter = MemoryQueryFormatter(codec: codec)
     }
@@ -69,36 +66,6 @@ final class MemoryQueryService: @unchecked Sendable {
     }
 
     func execute(request: MemoryQueryRequest) async -> MemoryQueryResult {
-        let query = request.question.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard settingsProvider().mem0Enabled else {
-            return unavailableResult(
-                query: query,
-                message: "Mem0 is disabled in settings."
-            )
-        }
-
-        guard apiKeyProvider()?.nilIfEmpty != nil else {
-            return unavailableResult(
-                query: query,
-                message: "OpenRouter API key is missing. Set it in Settings to query memory."
-            )
-        }
-
-        return await useCase.execute(request: request)
-    }
-
-    private func unavailableResult(query: String, message: String) -> MemoryQueryResult {
-        MemoryQueryResult(
-            query: query,
-            answer: message,
-            keyPoints: [],
-            supportingEvents: [],
-            insufficientEvidence: true,
-            mem0SemanticCount: 0,
-            bm25StoreCount: 0,
-            scope: MemoryQueryScope(start: nil, end: nil, label: nil),
-            generatedAt: Date()
-        )
+        await useCase.execute(request: request)
     }
 }

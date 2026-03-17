@@ -25,14 +25,26 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
         now: Date,
         timeZone: TimeZone,
         mem0Evidence: [MemoryEvidenceHit],
-        bm25Evidence: [MemoryEvidenceHit]
+        bm25Evidence: [MemoryEvidenceHit],
+        timeoutSeconds: TimeInterval
     ) async -> MemoryQueryAnswerResult? {
         guard let apiKey = apiKeyProvider()?.nilIfEmpty else {
             return nil
         }
+        guard timeoutSeconds > 0 else {
+            return nil
+        }
 
         let settings = settingsProvider()
-        let client = OpenRouterClient(config: openRouterConfig, settings: settings)
+        let client = OpenRouterClient(
+            config: OpenRouterRuntimeConfig(
+                endpoint: openRouterConfig.endpoint,
+                model: openRouterConfig.model,
+                reasoningEffort: openRouterConfig.reasoningEffort,
+                timeoutSeconds: min(openRouterConfig.timeoutSeconds, timeoutSeconds)
+            ),
+            settings: settings
+        )
 
         let evidenceLimit = detailLevel == .detailed ? 120 : 36
         let orderedMem0 = orderedEvidence(mem0Evidence, detailLevel: detailLevel)

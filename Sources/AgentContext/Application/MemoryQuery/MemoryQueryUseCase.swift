@@ -7,7 +7,10 @@ final class MemoryQueryUseCase: @unchecked Sendable {
     private let answerer: MemoryQueryAnswering
     private let usageWriter: UsageEventWriting
     private let scopeParser: MemoryQueryScopeParser
+    private let runtimeConfig: MemoryQueryRuntimeConfig
     private let calendar: Calendar
+    private let heuristicPlanner: MemoryQueryHeuristicPlanner
+    private let fallbackAnswerBuilder: MemoryQueryFallbackAnswerBuilder
 
     init(
         semanticRetriever: SemanticMemoryRetrieving,
@@ -16,6 +19,7 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         answerer: MemoryQueryAnswering,
         usageWriter: UsageEventWriting,
         scopeParser: MemoryQueryScopeParser,
+        runtimeConfig: MemoryQueryRuntimeConfig,
         calendar: Calendar = .autoupdatingCurrent
     ) {
         self.semanticRetriever = semanticRetriever
@@ -24,28 +28,23 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         self.answerer = answerer
         self.usageWriter = usageWriter
         self.scopeParser = scopeParser
+        self.runtimeConfig = runtimeConfig
         self.calendar = calendar
+        self.heuristicPlanner = MemoryQueryHeuristicPlanner(scopeParser: scopeParser)
+        self.fallbackAnswerBuilder = MemoryQueryFallbackAnswerBuilder(calendar: calendar)
     }
 
     func execute(request: MemoryQueryRequest) async -> MemoryQueryResult {
         let trimmed = request.question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return MemoryQueryResult(
-                query: request.question,
-                answer: "Enter a question to query memory.",
-                keyPoints: [],
-                supportingEvents: [],
-                insufficientEvidence: true,
-                mem0SemanticCount: 0,
-                bm25StoreCount: 0,
-                scope: MemoryQueryScope(start: nil, end: nil, label: nil),
-                generatedAt: Date()
-            )
+            return emptyQueryResult(for: request.question)
         }
 
         let now = Date()
         let timeZone = calendar.timeZone
-        let fallbackScope = scopeParser.inferScope(for: trimmed, referenceDate: now)
+        let fallbackScope = request.options.scopeOverride ?? scopeParser.inferScope(for: trimmed, referenceDate: now)
+        let deadline = now.addingTimeInterval(effectiveOverallTimeout(for: request.options))
+        let queryProfile = heuristicPlanner.profile(for: trimmed)
 
         var detailLevel: MemoryQueryDetailLevel = .concise
         var scope = fallbackScope
@@ -54,9 +53,14 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         var executedQueryKeys = Set<String>()
         var executedQueries: [String] = []
         var previousEvidenceCount = 0
-        let absoluteMaxPasses = 6
 
+        let absoluteMaxPasses = 3
         for pass in 1...absoluteMaxPasses {
+            guard remainingSeconds(until: deadline) > 0 else {
+                request.onProgress?("Query time budget exhausted; returning best partial result.")
+                break
+            }
+
             let planningQuestion = plannerQuestion(
                 originalQuestion: trimmed,
                 pass: pass,
@@ -66,126 +70,106 @@ final class MemoryQueryUseCase: @unchecked Sendable {
                 bm25Evidence: bm25Evidence
             )
 
-            let plannerResult = await planner.plan(
-                question: planningQuestion,
-                now: now,
-                detailLevel: detailLevel,
-                timeZone: timeZone
+            let plannerTimeout = stageBudget(
+                preferred: runtimeConfig.plannerTimeoutSeconds,
+                deadline: deadline,
+                reserveSeconds: plannerReserveSeconds(request: request, profile: queryProfile)
             )
-            if let usage = plannerResult?.usage {
-                await usageWriter.appendUsageEvent(usage)
+            let plannerResult: MemoryQueryPlanResult?
+            if plannerTimeout >= 1 {
+                request.onProgress?("Planning retrieval pass \(pass) (\(formattedSeconds(plannerTimeout)) budget)...")
+                plannerResult = await planner.plan(
+                    question: planningQuestion,
+                    now: now,
+                    detailLevel: detailLevel,
+                    timeZone: timeZone,
+                    timeoutSeconds: plannerTimeout
+                )
+            } else {
+                plannerResult = nil
             }
 
-            if let plannedLevel = plannerResult?.plan.detailLevel {
+            let effectivePlannerResult = plannerResult ?? heuristicPlanner.fallbackPlanResult(
+                for: trimmed,
+                fallbackScope: fallbackScope,
+                detailLevel: detailLevel,
+                requestOptions: request.options
+            )
+
+            if let usage = plannerResult?.usage {
+                await usageWriter.appendUsageEvent(usage)
+            } else if pass == 1 {
+                request.onProgress?("Planner unavailable; using heuristic local query planner.")
+            }
+
+            if let plannedLevel = effectivePlannerResult?.plan.detailLevel {
                 detailLevel = plannedLevel
             }
 
-            scope = resolvedScope(
-                question: trimmed,
-                plannerScope: plannerResult?.plan.scope,
-                fallbackScope: fallbackScope
+            if request.options.scopeOverride == nil {
+                scope = resolvedScope(
+                    question: trimmed,
+                    plannerScope: effectivePlannerResult?.plan.scope,
+                    fallbackScope: fallbackScope
+                )
+            }
+
+            let plannedSteps = normalizedPlanSteps(
+                plan: effectivePlannerResult?.plan,
+                originalQuestion: trimmed,
+                request: request,
+                profile: queryProfile
             )
-
-            let plannerQueries = plannerResult?.plan.queries ?? []
-            let normalized = scopeParser.normalizedQueries(for: trimmed, plannerQueries: plannerQueries)
-
-            var newQueries: [String] = []
-            for query in normalized {
-                let key = query.lowercased()
-                if executedQueryKeys.insert(key).inserted {
-                    newQueries.append(query)
-                    executedQueries.append(query)
-                }
+            let freshSteps = plannedSteps.filter { step in
+                let key = stepKey(step)
+                return executedQueryKeys.insert(key).inserted
             }
-            if pass == 1 && newQueries.isEmpty {
-                let fallbackKey = trimmed.lowercased()
-                if executedQueryKeys.insert(fallbackKey).inserted {
-                    newQueries = [trimmed]
-                    executedQueries.append(trimmed)
-                }
-            }
-            guard !newQueries.isEmpty else { break }
+            freshSteps.forEach { executedQueries.append($0.query) }
+            guard !freshSteps.isEmpty else { break }
 
-            let retrievalPlan = retrievalPlan(for: detailLevel)
-            let semanticHits = await semanticRetriever.retrieve(
-                queries: newQueries,
+            let effectivePlan = retrievalPlan(
+                for: detailLevel,
+                requestedMaxResults: request.options.maxResults,
+                enabledSources: request.options.sources
+            )
+            let phaseResults = await executePlannedSteps(
+                freshSteps,
                 scope: scope,
-                limit: retrievalPlan.perPassSemanticLimit
+                detailLevel: detailLevel,
+                retrievalPlan: effectivePlan,
+                deadline: deadline,
+                request: request,
+                profile: queryProfile
             )
-            let lexicalHits = await lexicalRetriever.retrieve(
-                queries: newQueries,
-                scope: scope,
-                limit: retrievalPlan.perPassLexicalLimit
-            )
-            mem0Evidence = mergeMem0(mem0Evidence, semanticHits, limit: retrievalPlan.semanticLimit)
-            bm25Evidence = mergeBM25(bm25Evidence, lexicalHits, limit: retrievalPlan.lexicalLimit)
-
-            if detailLevel == .detailed {
-                let dayScopes = dailyScopes(from: scope, maxDays: retrievalPlan.maxDailySlices)
-                for dayScope in dayScopes {
-                    let dailySemanticHits = await semanticRetriever.retrieve(
-                        queries: newQueries,
-                        scope: dayScope,
-                        limit: retrievalPlan.dailySemanticLimit
-                    )
-                    let dailyLexicalHits = await lexicalRetriever.retrieve(
-                        queries: newQueries,
-                        scope: dayScope,
-                        limit: retrievalPlan.dailyLexicalLimit
-                    )
-                    mem0Evidence = mergeMem0(mem0Evidence, dailySemanticHits, limit: retrievalPlan.semanticLimit)
-                    bm25Evidence = mergeBM25(bm25Evidence, dailyLexicalHits, limit: retrievalPlan.lexicalLimit)
-                }
-            }
+            mem0Evidence = mergeMem0(mem0Evidence, phaseResults.mem0Hits, limit: effectivePlan.semanticLimit)
+            bm25Evidence = mergeBM25(bm25Evidence, phaseResults.bm25Hits, limit: effectivePlan.lexicalLimit)
 
             let totalEvidenceCount = mem0Evidence.count + bm25Evidence.count
             let gained = totalEvidenceCount - previousEvidenceCount
             previousEvidenceCount = totalEvidenceCount
 
-            if pass >= retrievalPlan.maxPlannerPasses { break }
-            if totalEvidenceCount >= retrievalPlan.targetEvidenceCount { break }
-            if pass >= retrievalPlan.minPassesBeforeStop && gained <= retrievalPlan.minEvidenceGainPerPass {
+            if pass >= effectivePlan.maxPlannerPasses { break }
+            if totalEvidenceCount >= effectivePlan.targetEvidenceCount { break }
+            if pass >= effectivePlan.minPassesBeforeStop && gained <= effectivePlan.minEvidenceGainPerPass {
                 break
             }
         }
 
         guard !mem0Evidence.isEmpty || !bm25Evidence.isEmpty else {
-            return MemoryQueryResult(
-                query: trimmed,
-                answer: "No matching memories found in Mem0/BM25 memory stores.",
-                keyPoints: [],
-                supportingEvents: [],
-                insufficientEvidence: true,
-                mem0SemanticCount: 0,
-                bm25StoreCount: 0,
-                scope: scope,
-                generatedAt: Date()
-            )
+            return noMatchesResult(for: trimmed, scope: scope)
         }
 
-        let payload: MemoryQueryAnswerPayload
-        if let answerResult = await answerer.answer(
+        let payload = await resolveAnswerPayload(
             question: trimmed,
             scope: scope,
             detailLevel: detailLevel,
             now: now,
             timeZone: timeZone,
             mem0Evidence: mem0Evidence,
-            bm25Evidence: bm25Evidence
-        ) {
-            if let usage = answerResult.usage {
-                await usageWriter.appendUsageEvent(usage)
-            }
-            payload = answerResult.payload
-        } else {
-            payload = fallbackPayload(
-                question: trimmed,
-                scopeLabel: scope.label,
-                detailLevel: detailLevel,
-                mem0Evidence: mem0Evidence,
-                bm25Evidence: bm25Evidence
-            )
-        }
+            bm25Evidence: bm25Evidence,
+            deadline: deadline,
+            request: request
+        )
 
         return MemoryQueryResult(
             query: trimmed,
@@ -200,52 +184,278 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         )
     }
 
-    private func fallbackPayload(
-        question: String,
-        scopeLabel: String?,
-        detailLevel: MemoryQueryDetailLevel,
-        mem0Evidence: [MemoryEvidenceHit],
-        bm25Evidence: [MemoryEvidenceHit]
-    ) -> MemoryQueryAnswerPayload {
-        let scopedTitle: String
-        if let scopeLabel = scopeLabel?.nilIfEmpty {
-            scopedTitle = "Best matches (\(scopeLabel))"
-        } else {
-            scopedTitle = "Best matches"
-        }
-
-        let evidenceLimit = detailLevel == .detailed ? 32 : 8
-        let mem0Lines = mem0Evidence.prefix(evidenceLimit).map(formatEvidenceLine)
-        let bm25Lines = bm25Evidence.prefix(evidenceLimit).map(formatEvidenceLine)
-        let answer = ([scopedTitle, "Question: \(question)", "Mem0 semantic matches:"]
-            + (mem0Lines.isEmpty ? ["- none"] : mem0Lines)
-            + ["BM25 storage matches:"]
-            + (bm25Lines.isEmpty ? ["- none"] : bm25Lines))
-            .joined(separator: "\n")
-
-        return MemoryQueryAnswerPayload(
-            answer: answer,
+    private func emptyQueryResult(for query: String) -> MemoryQueryResult {
+        MemoryQueryResult(
+            query: query,
+            answer: "Enter a question to query memory.",
             keyPoints: [],
             supportingEvents: [],
-            insufficientEvidence: true
+            insufficientEvidence: true,
+            mem0SemanticCount: 0,
+            bm25StoreCount: 0,
+            scope: MemoryQueryScope(start: nil, end: nil, label: nil),
+            generatedAt: Date()
         )
     }
 
-    private func formatEvidenceLine(_ hit: MemoryEvidenceHit) -> String {
-        let iso = ISO8601DateFormatter()
-        let timestamp = hit.occurredAt.map { iso.string(from: $0) } ?? "unknown-time"
-        let app = hit.appName?.nilIfEmpty ?? "unknown-app"
-        let project = hit.project?.nilIfEmpty ?? hit.metadata["project"]?.nilIfEmpty ?? ""
-        let projectSuffix = project.isEmpty ? "" : " | project=\(project)"
-        let sourceScore: Double
-        switch hit.source {
-        case .mem0Semantic:
-            sourceScore = hit.semanticScore
-        case .bm25Store:
-            sourceScore = hit.lexicalScore
+    private func noMatchesResult(for query: String, scope: MemoryQueryScope) -> MemoryQueryResult {
+        MemoryQueryResult(
+            query: query,
+            answer: "No matching memories found in the enabled memory sources.",
+            keyPoints: [],
+            supportingEvents: [],
+            insufficientEvidence: true,
+            mem0SemanticCount: 0,
+            bm25StoreCount: 0,
+            scope: scope,
+            generatedAt: Date()
+        )
+    }
+
+    private func resolveAnswerPayload(
+        question: String,
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel,
+        now: Date,
+        timeZone: TimeZone,
+        mem0Evidence: [MemoryEvidenceHit],
+        bm25Evidence: [MemoryEvidenceHit],
+        deadline: Date,
+        request: MemoryQueryRequest
+    ) async -> MemoryQueryAnswerPayload {
+        let answerTimeout = stageBudget(
+            preferred: runtimeConfig.answerTimeoutSeconds,
+            deadline: deadline,
+            reserveSeconds: 0
+        )
+        if answerTimeout >= 1 {
+            request.onProgress?("Synthesizing answer (\(formattedSeconds(answerTimeout)) budget)...")
         }
 
-        return "- [\(timestamp)] source=\(hit.source.rawValue) score=\(String(format: "%.2f", sourceScore)) app=\(app)\(projectSuffix) | \(hit.text)"
+        if answerTimeout >= 1,
+           let answerResult = await answerer.answer(
+                question: question,
+                scope: scope,
+                detailLevel: detailLevel,
+                now: now,
+                timeZone: timeZone,
+                mem0Evidence: mem0Evidence,
+                bm25Evidence: bm25Evidence,
+                timeoutSeconds: answerTimeout
+           ) {
+            if let usage = answerResult.usage {
+                await usageWriter.appendUsageEvent(usage)
+            }
+            return answerResult.payload
+        }
+
+        request.onProgress?("Answer model unavailable or timed out; returning evidence summary.")
+        return fallbackAnswerBuilder.build(
+            question: question,
+            scopeLabel: scope.label,
+            detailLevel: detailLevel,
+            mem0Evidence: mem0Evidence,
+            bm25Evidence: bm25Evidence
+        )
+    }
+
+    private func effectiveOverallTimeout(for options: MemoryQueryOptions) -> TimeInterval {
+        let requested = options.timeoutSeconds ?? runtimeConfig.timeoutSeconds
+        return min(30, max(5, requested))
+    }
+
+    private func remainingSeconds(until deadline: Date) -> TimeInterval {
+        max(0, deadline.timeIntervalSinceNow)
+    }
+
+    private func stageBudget(
+        preferred: TimeInterval,
+        deadline: Date,
+        reserveSeconds: TimeInterval
+    ) -> TimeInterval {
+        let remaining = remainingSeconds(until: deadline)
+        let reserved = max(0, reserveSeconds)
+        let protectedRemaining = max(0, remaining - reserved)
+        if protectedRemaining >= 1 {
+            return min(preferred, protectedRemaining)
+        }
+        return min(preferred, remaining)
+    }
+
+    private func executePlannedSteps(
+        _ steps: [MemoryQueryPlanStep],
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel,
+        retrievalPlan: MemoryQueryRetrievalPlan,
+        deadline: Date,
+        request: MemoryQueryRequest,
+        profile: QueryIntentProfile
+    ) async -> StepExecutionOutput {
+        var aggregatedMem0: [MemoryEvidenceHit] = []
+        var aggregatedBM25: [MemoryEvidenceHit] = []
+
+        for phase in [MemoryQueryStepPhase.research, .evidence] {
+            let phaseSteps = steps.filter { $0.phase == phase }
+            guard !phaseSteps.isEmpty else { continue }
+            guard remainingSeconds(until: deadline) > 0 else { break }
+
+            request.onProgress?("Running \(phase.rawValue) retrieval with \(phaseSteps.count) step(s) in parallel...")
+
+            let phaseOutput = await withTaskGroup(of: StepExecutionOutput.self) { group in
+                for step in phaseSteps {
+                    group.addTask { [self] in
+                        await executeStep(
+                            step,
+                            scope: scope,
+                            detailLevel: detailLevel,
+                            retrievalPlan: retrievalPlan,
+                            deadline: deadline,
+                            request: request,
+                            profile: profile
+                        )
+                    }
+                }
+
+                var output = StepExecutionOutput()
+                for await result in group {
+                    output.mem0Hits.append(contentsOf: result.mem0Hits)
+                    output.bm25Hits.append(contentsOf: result.bm25Hits)
+                }
+                return output
+            }
+
+            aggregatedMem0.append(contentsOf: phaseOutput.mem0Hits)
+            aggregatedBM25.append(contentsOf: phaseOutput.bm25Hits)
+        }
+
+        return StepExecutionOutput(mem0Hits: aggregatedMem0, bm25Hits: aggregatedBM25)
+    }
+
+    private func executeStep(
+        _ step: MemoryQueryPlanStep,
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel,
+        retrievalPlan: MemoryQueryRetrievalPlan,
+        deadline: Date,
+        request: MemoryQueryRequest,
+        profile: QueryIntentProfile
+    ) async -> StepExecutionOutput {
+        guard remainingSeconds(until: deadline) > 0 else {
+            return StepExecutionOutput()
+        }
+
+        let effectiveStepLimit = resolvedStepLimit(
+            step: step,
+            detailLevel: detailLevel,
+            retrievalPlan: retrievalPlan
+        )
+        let normalizedQuery = step.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedQuery.isEmpty else {
+            return StepExecutionOutput()
+        }
+
+        async let mem0Hits: [MemoryEvidenceHit] = {
+            guard step.sources.contains(.mem0Semantic) else { return [] }
+            let timeout = stageBudget(
+                preferred: runtimeConfig.semanticSearchTimeoutSeconds,
+                deadline: deadline,
+                reserveSeconds: semanticReserveSeconds(request: request, profile: profile)
+            )
+            guard timeout >= 1 else { return [] }
+            return await semanticRetriever.retrieve(
+                queries: [normalizedQuery],
+                scope: scope,
+                limit: effectiveStepLimit,
+                timeoutSeconds: timeout
+            )
+        }()
+
+        async let bm25Hits: [MemoryEvidenceHit] = {
+            guard step.sources.contains(.bm25Store) else { return [] }
+            return await lexicalRetriever.retrieve(
+                queries: [normalizedQuery],
+                scope: scope,
+                limit: effectiveStepLimit
+            )
+        }()
+
+        return await StepExecutionOutput(
+            mem0Hits: mem0Hits,
+            bm25Hits: bm25Hits
+        )
+    }
+
+    private func resolvedStepLimit(
+        step: MemoryQueryPlanStep,
+        detailLevel: MemoryQueryDetailLevel,
+        retrievalPlan: MemoryQueryRetrievalPlan
+    ) -> Int {
+        let defaultLimit = detailLevel == .detailed ? 8 : 5
+        let planBound = max(retrievalPlan.perPassLexicalLimit, retrievalPlan.perPassSemanticLimit, defaultLimit)
+        if let maxResults = step.maxResults {
+            return max(1, min(maxResults, planBound))
+        }
+        return defaultLimit
+    }
+
+    private func normalizedPlanSteps(
+        plan: MemoryQueryPlan?,
+        originalQuestion: String,
+        request: MemoryQueryRequest,
+        profile: QueryIntentProfile
+    ) -> [MemoryQueryPlanStep] {
+        let fallbackSteps = heuristicPlanner.defaultPlanSteps(
+            for: originalQuestion,
+            requestOptions: request.options,
+            profile: profile
+        )
+        let candidateSteps = !(plan?.steps.isEmpty ?? true) ? (plan?.steps ?? []) : fallbackSteps
+
+        var seen = Set<String>()
+        var output: [MemoryQueryPlanStep] = []
+
+        for step in candidateSteps {
+            let effectiveSources = step.sources.intersection(request.options.sources)
+            guard !effectiveSources.isEmpty else { continue }
+
+            let normalized = MemoryQueryPlanStep(
+                query: step.query,
+                sources: effectiveSources,
+                phase: step.phase,
+                maxResults: step.maxResults
+            )
+            let key = stepKey(normalized)
+            guard seen.insert(key).inserted else { continue }
+            output.append(normalized)
+        }
+
+        if output.isEmpty {
+            return fallbackSteps
+        }
+        return Array(output.prefix(8))
+    }
+
+    private func stepKey(_ step: MemoryQueryPlanStep) -> String {
+        let sources = step.sources.map(\.rawValue).sorted().joined(separator: ",")
+        return "\(step.phase.rawValue)|\(sources)|\(step.query.lowercased())"
+    }
+
+    private func plannerReserveSeconds(request: MemoryQueryRequest, profile: QueryIntentProfile) -> TimeInterval {
+        if profile.prefersLexicalFirst {
+            return request.options.includesSemanticSearch && request.options.includesLexicalSearch ? 3 : 2
+        }
+        return request.options.includesSemanticSearch || request.options.includesLexicalSearch ? 2 : 0
+    }
+
+    private func semanticReserveSeconds(request: MemoryQueryRequest, profile: QueryIntentProfile) -> TimeInterval {
+        if profile.prefersLexicalFirst && request.options.includesLexicalSearch {
+            return 1.5
+        }
+        return request.options.includesLexicalSearch ? 1 : 0.5
+    }
+
+    private func formattedSeconds(_ value: TimeInterval) -> String {
+        String(format: "%.1fs", value)
     }
 
     private func resolvedScope(
@@ -265,34 +475,6 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         let end = plannerScope.end ?? fallbackScope.end
         let label = plannerScope.label?.nilIfEmpty ?? fallbackScope.label
         return MemoryQueryScope(start: start, end: end, label: label)
-    }
-
-    private func dailyScopes(from scope: MemoryQueryScope, maxDays: Int) -> [MemoryQueryScope] {
-        guard let start = scope.start, let end = scope.end, end > start else {
-            return []
-        }
-
-        let dayStart = calendar.startOfDay(for: start)
-        let lastStart = calendar.startOfDay(for: end.addingTimeInterval(-1))
-        let dayCount = calendar.dateComponents([.day], from: dayStart, to: lastStart).day ?? 0
-        guard dayCount >= 1 else {
-            return []
-        }
-
-        var slices: [MemoryQueryScope] = []
-        var cursor = dayStart
-
-        while cursor <= lastStart && slices.count < maxDays {
-            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
-            let clampedEnd = min(next, end)
-            let label = scope.label.map { "\($0) • \(isoDay(cursor))" } ?? isoDay(cursor)
-            slices.append(
-                MemoryQueryScope(start: cursor, end: clampedEnd, label: label)
-            )
-            cursor = next
-        }
-
-        return slices
     }
 
     private func mergeMem0(
@@ -343,37 +525,50 @@ final class MemoryQueryUseCase: @unchecked Sendable {
             .map { $0 }
     }
 
-    private func retrievalPlan(for detailLevel: MemoryQueryDetailLevel) -> MemoryQueryRetrievalPlan {
+    private func retrievalPlan(
+        for detailLevel: MemoryQueryDetailLevel,
+        requestedMaxResults: Int?,
+        enabledSources: Set<MemoryEvidenceSource>
+    ) -> MemoryQueryRetrievalPlan {
+        let basePlan: MemoryQueryRetrievalPlan
         switch detailLevel {
         case .concise:
-            return MemoryQueryRetrievalPlan(
-                semanticLimit: 90,
-                lexicalLimit: 70,
-                perPassSemanticLimit: 36,
-                perPassLexicalLimit: 28,
-                dailySemanticLimit: 0,
-                dailyLexicalLimit: 0,
-                maxDailySlices: 0,
+            basePlan = MemoryQueryRetrievalPlan(
+                semanticLimit: 18,
+                lexicalLimit: 18,
+                perPassSemanticLimit: 12,
+                perPassLexicalLimit: 12,
                 maxPlannerPasses: 2,
-                targetEvidenceCount: 70,
+                targetEvidenceCount: 18,
                 minPassesBeforeStop: 1,
-                minEvidenceGainPerPass: 0
+                minEvidenceGainPerPass: 1
             )
         case .detailed:
-            return MemoryQueryRetrievalPlan(
-                semanticLimit: 220,
-                lexicalLimit: 180,
-                perPassSemanticLimit: 64,
-                perPassLexicalLimit: 52,
-                dailySemanticLimit: 20,
-                dailyLexicalLimit: 16,
-                maxDailySlices: 14,
-                maxPlannerPasses: 5,
-                targetEvidenceCount: 180,
+            basePlan = MemoryQueryRetrievalPlan(
+                semanticLimit: 32,
+                lexicalLimit: 32,
+                perPassSemanticLimit: 18,
+                perPassLexicalLimit: 18,
+                maxPlannerPasses: 3,
+                targetEvidenceCount: 32,
                 minPassesBeforeStop: 2,
-                minEvidenceGainPerPass: 3
+                minEvidenceGainPerPass: 2
             )
         }
+
+        let sourceCount = max(1, enabledSources.count)
+        let requestedPerSource = requestedMaxResults.map { max(1, Int(ceil(Double($0) / Double(sourceCount)))) }
+
+        return MemoryQueryRetrievalPlan(
+            semanticLimit: enabledSources.contains(.mem0Semantic) ? min(basePlan.semanticLimit, requestedPerSource ?? basePlan.semanticLimit) : 0,
+            lexicalLimit: enabledSources.contains(.bm25Store) ? min(basePlan.lexicalLimit, requestedPerSource ?? basePlan.lexicalLimit) : 0,
+            perPassSemanticLimit: enabledSources.contains(.mem0Semantic) ? min(basePlan.perPassSemanticLimit, requestedPerSource ?? basePlan.perPassSemanticLimit) : 0,
+            perPassLexicalLimit: enabledSources.contains(.bm25Store) ? min(basePlan.perPassLexicalLimit, requestedPerSource ?? basePlan.perPassLexicalLimit) : 0,
+            maxPlannerPasses: basePlan.maxPlannerPasses,
+            targetEvidenceCount: requestedMaxResults ?? basePlan.targetEvidenceCount,
+            minPassesBeforeStop: basePlan.minPassesBeforeStop,
+            minEvidenceGainPerPass: basePlan.minEvidenceGainPerPass
+        )
     }
 
     private func isoDay(_ date: Date) -> String {
@@ -426,7 +621,8 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         Evidence preview:
         \(previewText)
 
-        Return only new, non-duplicate retrieval queries that fill missing details and chronology gaps.
+        Return only new, non-duplicate retrieval steps that fill missing details and chronology gaps.
+        Use research steps when fast local reconnaissance would improve later evidence retrieval.
         """
     }
 }
@@ -436,11 +632,13 @@ private struct MemoryQueryRetrievalPlan {
     let lexicalLimit: Int
     let perPassSemanticLimit: Int
     let perPassLexicalLimit: Int
-    let dailySemanticLimit: Int
-    let dailyLexicalLimit: Int
-    let maxDailySlices: Int
     let maxPlannerPasses: Int
     let targetEvidenceCount: Int
     let minPassesBeforeStop: Int
     let minEvidenceGainPerPass: Int
+}
+
+private struct StepExecutionOutput {
+    var mem0Hits: [MemoryEvidenceHit] = []
+    var bm25Hits: [MemoryEvidenceHit] = []
 }

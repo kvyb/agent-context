@@ -170,7 +170,13 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        let response = try call(payload: payload, model: model, kind: "artifact_screenshot", apiKey: apiKey)
+        let response = try call(
+            payload: payload,
+            model: model,
+            kind: "artifact_screenshot",
+            apiKey: apiKey,
+            timeoutSeconds: timeoutSeconds
+        )
         return response
     }
 
@@ -243,7 +249,13 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        return try call(payload: payload, model: model, kind: "artifact_audio", apiKey: apiKey)
+        return try call(
+            payload: payload,
+            model: model,
+            kind: "artifact_audio",
+            apiKey: apiKey,
+            timeoutSeconds: timeoutSeconds
+        )
     }
 
     func synthesizePerAppInterval(
@@ -355,7 +367,13 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        return try call(payload: payload, model: model, kind: "synthesis_interval_app", apiKey: apiKey)
+        return try call(
+            payload: payload,
+            model: model,
+            kind: "synthesis_interval_app",
+            apiKey: apiKey,
+            timeoutSeconds: timeoutSeconds
+        )
     }
 
     func synthesizeHour(
@@ -453,7 +471,13 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
-        return try call(payload: payload, model: model, kind: "synthesis_hour", apiKey: apiKey)
+        return try call(
+            payload: payload,
+            model: model,
+            kind: "synthesis_hour",
+            apiKey: apiKey,
+            timeoutSeconds: timeoutSeconds
+        )
     }
 
     func planMemoryQuery(
@@ -465,14 +489,20 @@ final class OpenRouterClient: @unchecked Sendable {
     ) throws -> OpenRouterCallResult {
         let systemPrompt = """
         You generate compact retrieval plans for a life-log memory store.
-        Return strict JSON only with keys: detail_level, queries, timeframe.
+        Return strict JSON only with keys: detail_level, steps, timeframe.
         Rules:
-        - queries: 1-10 short retrieval queries ordered by expected usefulness.
-        - Keep queries retrieval-oriented (nouns/entities/actions), never answer-oriented.
-        - If the question names a specific project/repo/person/entity, include that token verbatim in most queries.
+        - steps: 1-8 structured retrieval steps ordered by execution priority.
+        - Each step must contain: query, phase, sources, max_results.
+        - query must be short and retrieval-oriented (nouns/entities/actions), never answer-oriented.
+        - phase must be either research or evidence.
+        - sources must contain one or both of: bm25, mem0.
+        - Use bm25 research steps when you need fast local reconnaissance before broader evidence retrieval.
+        - Use evidence steps for the main retrieval pass.
+        - If the question names a specific project/repo/person/entity, include that token verbatim in most step queries.
         - Keep user entities/nouns exactly as written when present.
         - Add aliases only when high-confidence and concise.
-        - Avoid paraphrase explosion; do not output near-duplicate queries.
+        - Avoid paraphrase explosion; do not output near-duplicate steps.
+        - max_results should usually be between 3 and 12.
         - detail_level must be either concise or detailed.
         - Infer detail_level from user intent (detailed report/timeline/exhaustive requests => detailed).
         - timeframe must include start, end, label.
@@ -507,11 +537,36 @@ final class OpenRouterClient: @unchecked Sendable {
                                 "type": "string",
                                 "enum": ["concise", "detailed"]
                             ],
-                            "queries": [
+                            "steps": [
                                 "type": "array",
-                                "items": ["type": "string"],
+                                "items": [
+                                    "type": "object",
+                                    "properties": [
+                                        "query": ["type": "string"],
+                                        "phase": [
+                                            "type": "string",
+                                            "enum": ["research", "evidence"]
+                                        ],
+                                        "sources": [
+                                            "type": "array",
+                                            "items": [
+                                                "type": "string",
+                                                "enum": ["bm25", "mem0"]
+                                            ],
+                                            "minItems": 1,
+                                            "maxItems": 2
+                                        ],
+                                        "max_results": [
+                                            "type": "integer",
+                                            "minimum": 1,
+                                            "maximum": 20
+                                        ]
+                                    ],
+                                    "required": ["query", "phase", "sources", "max_results"],
+                                    "additionalProperties": false
+                                ],
                                 "minItems": 1,
-                                "maxItems": 10
+                                "maxItems": 8
                             ],
                             "timeframe": [
                                 "type": "object",
@@ -524,7 +579,7 @@ final class OpenRouterClient: @unchecked Sendable {
                                 "additionalProperties": false
                             ]
                         ],
-                        "required": ["detail_level", "queries", "timeframe"],
+                        "required": ["detail_level", "steps", "timeframe"],
                         "additionalProperties": false
                     ]
                 ]
@@ -662,11 +717,22 @@ final class OpenRouterClient: @unchecked Sendable {
         apiKey: String
     ) throws -> OpenRouterCallResult {
         var latestError: Error?
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
         for model in models {
             var modelPayload = payload
             modelPayload["model"] = model
+            let remainingTimeout = max(0.5, deadline.timeIntervalSinceNow)
+            if remainingTimeout <= 0.5, latestError != nil {
+                break
+            }
             do {
-                return try call(payload: modelPayload, model: model, kind: kind, apiKey: apiKey)
+                return try call(
+                    payload: modelPayload,
+                    model: model,
+                    kind: kind,
+                    apiKey: apiKey,
+                    timeoutSeconds: remainingTimeout
+                )
             } catch {
                 latestError = error
             }
@@ -679,7 +745,13 @@ final class OpenRouterClient: @unchecked Sendable {
         )
     }
 
-    private func call(payload: [String: Any], model: String, kind: String, apiKey: String) throws -> OpenRouterCallResult {
+    private func call(
+        payload: [String: Any],
+        model: String,
+        kind: String,
+        apiKey: String,
+        timeoutSeconds: TimeInterval
+    ) throws -> OpenRouterCallResult {
         let body = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var request = URLRequest(url: endpoint)

@@ -73,29 +73,6 @@ struct MemoryQueryScopeParser: Sendable {
         explicitDateScope(for: query, referenceDate: Date()) != nil
     }
 
-    func normalizedQueries(for question: String, plannerQueries: [String]) -> [String] {
-        let combined = plannerQueries + [question]
-        var seen = Set<String>()
-        var output: [String] = []
-
-        for value in combined {
-            guard let normalized = value.nilIfEmpty else { continue }
-            let key = normalized.lowercased()
-            if seen.insert(key).inserted {
-                output.append(normalized)
-            }
-            if output.count >= 10 {
-                break
-            }
-        }
-
-        if output.isEmpty, let fallback = question.nilIfEmpty {
-            output = [fallback]
-        }
-
-        return output
-    }
-
     func tokenize(_ text: String) -> [String] {
         text.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)

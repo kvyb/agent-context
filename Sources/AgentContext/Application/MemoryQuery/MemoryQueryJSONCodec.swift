@@ -4,6 +4,7 @@ struct MemoryQueryJSONCodec: Sendable {
     func parsePlan(from text: String) -> MemoryQueryPlan? {
         guard let object = parseJSONObject(from: text) else { return nil }
 
+        let structuredSteps = parseSteps(from: object)
         let queries = ((object["queries"] as? [String]) ?? [])
             + ((object["search_queries"] as? [String]) ?? [])
 
@@ -23,9 +24,18 @@ struct MemoryQueryJSONCodec: Sendable {
         let detailLevelRaw = (object["detail_level"] as? String)?.lowercased() ?? ""
         let detailLevel = MemoryQueryDetailLevel(rawValue: detailLevelRaw) ?? .concise
 
+        let scope = MemoryQueryScope(start: start, end: end, label: label)
+        if !structuredSteps.isEmpty {
+            return MemoryQueryPlan(
+                steps: structuredSteps,
+                scope: scope,
+                detailLevel: detailLevel
+            )
+        }
+
         return MemoryQueryPlan(
             queries: queries.compactMap(\.nilIfEmpty),
-            scope: MemoryQueryScope(start: start, end: end, label: label),
+            scope: scope,
             detailLevel: detailLevel
         )
     }
@@ -134,5 +144,48 @@ struct MemoryQueryJSONCodec: Sendable {
         dayFormatter.timeZone = .autoupdatingCurrent
         dayFormatter.dateFormat = "yyyy-MM-dd"
         return dayFormatter.date(from: value)
+    }
+
+    private func parseSteps(from object: [String: Any]) -> [MemoryQueryPlanStep] {
+        guard let rawSteps = object["steps"] as? [[String: Any]] else {
+            return []
+        }
+
+        return rawSteps.compactMap { raw in
+            guard let query = (raw["query"] as? String)?.nilIfEmpty else {
+                return nil
+            }
+
+            let phaseRaw = (raw["phase"] as? String)?.lowercased() ?? MemoryQueryStepPhase.evidence.rawValue
+            let phase = MemoryQueryStepPhase(rawValue: phaseRaw) ?? .evidence
+
+            let sources: Set<MemoryEvidenceSource>
+            if let rawSources = raw["sources"] as? [String] {
+                let parsed = rawSources.reduce(into: Set<MemoryEvidenceSource>()) { acc, source in
+                    if let value = MemoryEvidenceSource(cliValue: source) {
+                        acc.insert(value)
+                    }
+                }
+                sources = parsed.isEmpty ? Set(MemoryEvidenceSource.allCases) : parsed
+            } else {
+                sources = Set(MemoryEvidenceSource.allCases)
+            }
+
+            let maxResults: Int?
+            if let rawMax = raw["max_results"] as? Int {
+                maxResults = max(1, min(rawMax, 50))
+            } else if let rawMax = raw["max_results"] as? Double {
+                maxResults = max(1, min(Int(rawMax), 50))
+            } else {
+                maxResults = nil
+            }
+
+            return MemoryQueryPlanStep(
+                query: query,
+                sources: sources,
+                phase: phase,
+                maxResults: maxResults
+            )
+        }
     }
 }

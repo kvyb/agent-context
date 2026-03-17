@@ -170,7 +170,8 @@ final class TrackerRuntime: @unchecked Sendable {
             mem0Searcher: mem0Searcher,
             settingsProvider: settingsProvider,
             apiKeyProvider: apiKeyProvider,
-            openRouterConfig: config.openRouter
+            openRouterConfig: config.openRouter,
+            runtimeConfig: config.memoryQuery
         )
 
         var calendar = Calendar(identifier: .gregorian)
@@ -353,11 +354,18 @@ final class TrackerRuntime: @unchecked Sendable {
         )
     }
 
-    func runMemoryQuery(_ query: String, format: MemoryQueryOutputFormat = .text) async -> String {
+    func runMemoryQuery(
+        _ query: String,
+        format: MemoryQueryOutputFormat = .text,
+        options: MemoryQueryOptions = .default,
+        onProgress: (@Sendable (String) -> Void)? = nil
+    ) async -> String {
         await memoryQueryService.render(
             request: MemoryQueryRequest(
                 question: query,
-                outputFormat: format
+                outputFormat: format,
+                options: options,
+                onProgress: onProgress
             )
         )
     }

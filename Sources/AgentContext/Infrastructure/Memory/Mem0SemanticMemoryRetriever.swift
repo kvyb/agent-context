@@ -12,7 +12,12 @@ final class Mem0SemanticMemoryRetriever: SemanticMemoryRetrieving, @unchecked Se
         self.settingsProvider = settingsProvider
     }
 
-    func retrieve(queries: [String], scope: MemoryQueryScope, limit: Int) async -> [MemoryEvidenceHit] {
+    func retrieve(
+        queries: [String],
+        scope: MemoryQueryScope,
+        limit: Int,
+        timeoutSeconds: TimeInterval?
+    ) async -> [MemoryEvidenceHit] {
         let settings = settingsProvider()
         var merged: [String: MemoryEvidenceHit] = [:]
 
@@ -21,6 +26,7 @@ final class Mem0SemanticMemoryRetriever: SemanticMemoryRetrieving, @unchecked Se
             start: scope.start,
             end: scope.end,
             limit: max(1, limit),
+            timeoutSeconds: timeoutSeconds,
             settings: settings
         )
 

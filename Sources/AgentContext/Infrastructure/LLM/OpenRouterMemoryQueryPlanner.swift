@@ -22,14 +22,26 @@ final class OpenRouterMemoryQueryPlanner: MemoryQueryPlanning, @unchecked Sendab
         question: String,
         now: Date,
         detailLevel: MemoryQueryDetailLevel,
-        timeZone: TimeZone
+        timeZone: TimeZone,
+        timeoutSeconds: TimeInterval
     ) async -> MemoryQueryPlanResult? {
         guard let apiKey = apiKeyProvider()?.nilIfEmpty else {
             return nil
         }
+        guard timeoutSeconds > 0 else {
+            return nil
+        }
 
         let settings = settingsProvider()
-        let client = OpenRouterClient(config: openRouterConfig, settings: settings)
+        let client = OpenRouterClient(
+            config: OpenRouterRuntimeConfig(
+                endpoint: openRouterConfig.endpoint,
+                model: openRouterConfig.model,
+                reasoningEffort: openRouterConfig.reasoningEffort,
+                timeoutSeconds: min(openRouterConfig.timeoutSeconds, timeoutSeconds)
+            ),
+            settings: settings
+        )
 
         do {
             let response = try client.planMemoryQuery(
