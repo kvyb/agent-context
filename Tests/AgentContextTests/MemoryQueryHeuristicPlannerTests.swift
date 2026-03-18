@@ -44,4 +44,15 @@ final class MemoryQueryHeuristicPlannerTests: XCTestCase {
         XCTAssertFalse(terms.contains("17th"))
         XCTAssertFalse(terms.contains("march"))
     }
+
+    func testProfileMarksInterviewFitQueriesAsDetailed() {
+        let planner = MemoryQueryHeuristicPlanner(scopeParser: MemoryQueryScopeParser())
+
+        let profile = planner.profile(
+            for: "How well does the candidate from the zoom interview last night match an intermediate level? What questions were answered, and what are the strengths, weaknesses, and fit?"
+        )
+
+        XCTAssertTrue(profile.prefersDetailedAnswer)
+        XCTAssertEqual(profile.requestedFacets, ["questions answered", "strengths", "weaknesses", "fit"])
+    }
 }

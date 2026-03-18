@@ -362,6 +362,54 @@ final class MemoryQueryUseCaseTests: XCTestCase {
         XCTAssertEqual(semanticQueries, ["manychat", "manychat tasks", "manychat blockers"])
     }
 
+    func testRelativeScopeIsNotBroadenedByPlanner() async {
+        let semantic = FakeSemanticRetriever(hits: [])
+        let lexical = FakeLexicalRetriever(hits: [
+            sampleHit(id: "b1", source: .bm25Store, text: "Transcript summary: candidate discussed retrieval metrics", score: 0.9)
+        ])
+        let planner = FakePlanner(
+            result: MemoryQueryPlanResult(
+                plan: MemoryQueryPlan(
+                    queries: ["candidate interview"],
+                    scope: MemoryQueryScope(
+                        start: Date(timeIntervalSince1970: 0),
+                        end: Date(timeIntervalSince1970: 172_800),
+                        label: "last 48 hours"
+                    ),
+                    detailLevel: .detailed
+                ),
+                usage: nil
+            )
+        )
+        let useCase = MemoryQueryUseCase(
+            semanticRetriever: semantic,
+            lexicalRetriever: lexical,
+            planner: planner,
+            answerer: FakeAnswerer(result: nil),
+            usageWriter: FakeUsageWriter(),
+            scopeParser: MemoryQueryScopeParser(calendar: fixedCalendar),
+            runtimeConfig: sampleRuntimeConfig(),
+            calendar: fixedCalendar
+        )
+
+        let result = await useCase.execute(
+            request: MemoryQueryRequest(
+                question: "How well did the candidate from the zoom interview last night do?",
+                outputFormat: .text,
+                options: MemoryQueryOptions(
+                    sources: [.bm25Store],
+                    scopeOverride: nil,
+                    maxResults: 3,
+                    timeoutSeconds: 10
+                )
+            )
+        )
+
+        XCTAssertEqual(result.scope.label, "last night")
+        XCTAssertEqual(result.scope.start, date(year: 2026, month: 3, day: 16, hour: 18))
+        XCTAssertEqual(result.scope.end, date(year: 2026, month: 3, day: 17, hour: 6))
+    }
+
     private func sampleUsage(id: String) -> LLMUsageEvent {
         LLMUsageEvent(
             id: id,
@@ -384,6 +432,12 @@ final class MemoryQueryUseCaseTests: XCTestCase {
         )
     }
 
+    private var fixedCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }
+
     private func sampleHit(id: String, source: MemoryEvidenceSource, text: String, score: Double) -> MemoryEvidenceHit {
         MemoryEvidenceHit(
             id: id,
@@ -397,6 +451,17 @@ final class MemoryQueryUseCaseTests: XCTestCase {
             lexicalScore: source == .bm25Store ? score : 0,
             hybridScore: score
         )
+    }
+
+    private func date(year: Int, month: Int, day: Int, hour: Int = 0) -> Date {
+        fixedCalendar.date(from: DateComponents(
+            calendar: fixedCalendar,
+            timeZone: fixedCalendar.timeZone,
+            year: year,
+            month: month,
+            day: day,
+            hour: hour
+        ))!
     }
 }
 

@@ -704,42 +704,47 @@ actor SQLiteStore {
 
         var output: [StoredEvidenceRecord] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            let id = string(statement, column: 0) ?? UUID().uuidString
-            let kind = ArtifactKind(rawValue: string(statement, column: 1) ?? "screenshot") ?? .screenshot
-            let analysisJSON = string(statement, column: 15)
-            let analysis: ArtifactAnalysis?
-            if let analysisJSON,
-               let data = analysisJSON.data(using: .utf8) {
-                analysis = try? jsonDecoder.decode(ArtifactAnalysis.self, from: data)
-            } else {
-                analysis = nil
-            }
-
-            let metadata = ArtifactMetadata(
-                id: id,
-                kind: kind,
-                path: string(statement, column: 2) ?? "",
-                capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
-                app: AppDescriptor(
-                    appName: string(statement, column: 4) ?? appName,
-                    bundleID: string(statement, column: 5),
-                    pid: sqlite3_column_int(statement, 6)
-                ),
-                window: WindowContext(
-                    title: string(statement, column: 7),
-                    documentPath: string(statement, column: 8),
-                    url: string(statement, column: 9),
-                    workspace: string(statement, column: 10),
-                    project: string(statement, column: 11)
-                ),
-                intervalID: string(statement, column: 12),
-                captureReason: string(statement, column: 13) ?? "unknown",
-                sequenceInInterval: Int(sqlite3_column_int(statement, 14))
-            )
-
-            output.append(StoredEvidenceRecord(metadata: metadata, analysis: analysis))
+            output.append(decodeStoredEvidenceRecord(from: statement, fallbackAppName: appName))
         }
 
+        return output
+    }
+
+    func listEvidenceRecords(start: Date?, end: Date?, limit: Int) throws -> [StoredEvidenceRecord] {
+        var sql = """
+            SELECT id, kind, artifact_path, captured_at, app_name, bundle_id, pid,
+                   window_title, document_path, window_url, workspace, project,
+                   interval_id, capture_reason, sequence_in_interval, analysis_json
+              FROM evidence
+             WHERE analysis_json IS NOT NULL
+        """
+        var bindIndex: Int32 = 1
+        if start != nil {
+            sql += " AND captured_at >= ?"
+        }
+        if end != nil {
+            sql += " AND captured_at < ?"
+        }
+        sql += " ORDER BY captured_at DESC LIMIT ?;"
+
+        var statement: OpaquePointer?
+        try prepare(sql, statement: &statement)
+        defer { sqlite3_finalize(statement) }
+
+        if let start {
+            sqlite3_bind_double(statement, bindIndex, start.timeIntervalSince1970)
+            bindIndex += 1
+        }
+        if let end {
+            sqlite3_bind_double(statement, bindIndex, end.timeIntervalSince1970)
+            bindIndex += 1
+        }
+        sqlite3_bind_int(statement, bindIndex, Int32(max(1, min(limit, 2_000))))
+
+        var output: [StoredEvidenceRecord] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            output.append(decodeStoredEvidenceRecord(from: statement, fallbackAppName: nil))
+        }
         return output
     }
 
@@ -1617,6 +1622,37 @@ actor SQLiteStore {
             )
         }
         return rows
+    }
+
+    private func decodeStoredEvidenceRecord(
+        from statement: OpaquePointer?,
+        fallbackAppName: String?
+    ) -> StoredEvidenceRecord {
+        let id = string(statement, column: 0) ?? UUID().uuidString
+        let kind = ArtifactKind(rawValue: string(statement, column: 1) ?? "screenshot") ?? .screenshot
+        let analysis = parseAnalysisJSON(string(statement, column: 15))
+        let metadata = ArtifactMetadata(
+            id: id,
+            kind: kind,
+            path: string(statement, column: 2) ?? "",
+            capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
+            app: AppDescriptor(
+                appName: string(statement, column: 4) ?? fallbackAppName ?? "Unknown",
+                bundleID: string(statement, column: 5),
+                pid: sqlite3_column_int(statement, 6)
+            ),
+            window: WindowContext(
+                title: string(statement, column: 7),
+                documentPath: string(statement, column: 8),
+                url: string(statement, column: 9),
+                workspace: string(statement, column: 10),
+                project: string(statement, column: 11)
+            ),
+            intervalID: string(statement, column: 12),
+            captureReason: string(statement, column: 13) ?? "unknown",
+            sequenceInInterval: Int(sqlite3_column_int(statement, 14))
+        )
+        return StoredEvidenceRecord(metadata: metadata, analysis: analysis)
     }
 
     private func parseAnalysisJSON(_ analysisJSON: String?) -> ArtifactAnalysis? {

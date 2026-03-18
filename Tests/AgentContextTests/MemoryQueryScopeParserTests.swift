@@ -59,6 +59,18 @@ final class MemoryQueryScopeParserTests: XCTestCase {
         XCTAssertEqual(scope.end, date(year: 2026, month: 3, day: 12))
     }
 
+    func testInferLastNightScope() {
+        let reference = date(year: 2026, month: 3, day: 17, hour: 10)
+        let scope = parser.inferScope(
+            for: "how did the interview last night go?",
+            referenceDate: reference
+        )
+
+        XCTAssertEqual(scope.label, "last night")
+        XCTAssertEqual(scope.start, date(year: 2026, month: 3, day: 16, hour: 18))
+        XCTAssertEqual(scope.end, date(year: 2026, month: 3, day: 17, hour: 6))
+    }
+
     private func date(year: Int, month: Int, day: Int, hour: Int = 0) -> Date {
         calendar.date(from: DateComponents(
             calendar: calendar,

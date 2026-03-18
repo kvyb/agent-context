@@ -15,6 +15,11 @@ struct MemoryQueryScopeParser: Sendable {
         let lowered = query.lowercased()
         let todayStart = calendar.startOfDay(for: referenceDate)
 
+        if lowered.contains("last night"),
+           let scope = nightScope(dayOffset: -1, from: todayStart) {
+            return scope
+        }
+
         if lowered.contains("today") {
             let end = calendar.date(byAdding: .day, value: 1, to: todayStart)
             return MemoryQueryScope(start: todayStart, end: end, label: "today")
@@ -212,5 +217,16 @@ struct MemoryQueryScopeParser: Sendable {
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = format
         return formatter
+    }
+
+    private func nightScope(dayOffset: Int, from todayStart: Date) -> MemoryQueryScope? {
+        guard
+            let nightStartDay = calendar.date(byAdding: .day, value: dayOffset, to: todayStart),
+            let start = calendar.date(byAdding: .hour, value: 18, to: nightStartDay),
+            let end = calendar.date(byAdding: .hour, value: 6, to: todayStart)
+        else {
+            return nil
+        }
+        return MemoryQueryScope(start: start, end: end, label: "last night")
     }
 }

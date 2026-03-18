@@ -148,6 +148,11 @@ final class MemoryQueryUseCase: @unchecked Sendable {
             let gained = totalEvidenceCount - previousEvidenceCount
             previousEvidenceCount = totalEvidenceCount
 
+            if queryProfile.prefersLexicalFirst, hasTranscriptCoverage(in: bm25Evidence) {
+                request.onProgress?("Captured transcript evidence locally; preserving remaining budget for answer synthesis.")
+                break
+            }
+
             if pass >= effectivePlan.maxPlannerPasses { break }
             if totalEvidenceCount >= effectivePlan.targetEvidenceCount { break }
             if pass >= effectivePlan.minPassesBeforeStop && gained <= effectivePlan.minEvidenceGainPerPass {
@@ -465,6 +470,11 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         profile: QueryIntentProfile,
         detailLevel: MemoryQueryDetailLevel
     ) -> [String] {
+        if profile.prefersLexicalFirst,
+           steps.contains(where: { $0.sources.contains(.bm25Store) }) {
+            return []
+        }
+
         let maxQueries = semanticQueryCap(profile: profile, detailLevel: detailLevel)
         guard maxQueries > 0 else {
             return []
@@ -530,7 +540,9 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         plannerScope: MemoryQueryScope?,
         fallbackScope: MemoryQueryScope
     ) -> MemoryQueryScope {
-        if scopeParser.hasExplicitDate(in: question) {
+        if scopeParser.hasExplicitDate(in: question)
+            || fallbackScope.start != nil
+            || fallbackScope.end != nil {
             return fallbackScope
         }
 
@@ -691,6 +703,13 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         Return only new, non-duplicate retrieval steps that fill missing details and chronology gaps.
         Use research steps when fast local reconnaissance would improve later evidence retrieval.
         """
+    }
+
+    private func hasTranscriptCoverage(in evidence: [MemoryEvidenceHit]) -> Bool {
+        evidence.filter { hit in
+            hit.metadata["artifact_kind"] == ArtifactKind.audio.rawValue
+                && hit.metadata["has_transcript"] == "true"
+        }.count >= 2
     }
 }
 

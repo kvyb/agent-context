@@ -25,6 +25,13 @@ struct MemoryQueryHeuristicPlanner: Sendable {
             "takeaways",
             "struggles",
             "blockers",
+            "strengths",
+            "weaknesses",
+            "fit",
+            "match",
+            "level",
+            "questions answered",
+            "questions",
             "everything",
             "comprehensive",
             "summarize",
@@ -181,6 +188,18 @@ struct MemoryQueryHeuristicPlanner: Sendable {
         }
         if loweredQuestion.contains("struggle") || loweredQuestion.contains("blocker") || loweredQuestion.contains("problem") {
             facets.append("blockers")
+        }
+        if loweredQuestion.contains("question") {
+            facets.append("questions answered")
+        }
+        if loweredQuestion.contains("strength") {
+            facets.append("strengths")
+        }
+        if loweredQuestion.contains("weakness") {
+            facets.append("weaknesses")
+        }
+        if loweredQuestion.contains("fit") || loweredQuestion.contains("match") || loweredQuestion.contains("level") {
+            facets.append("fit")
         }
         return facets
     }

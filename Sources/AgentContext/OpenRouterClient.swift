@@ -622,6 +622,7 @@ final class OpenRouterClient: @unchecked Sendable {
         - supporting_events: short event lines with timestamps/apps when available.
         - If evidence is weak or missing for parts of the question, set insufficient_evidence=true and state limits.
         - Treat explicit dates as hard constraints.
+        - If the user asks for interview or candidate evaluation, explicitly cover questions answered, strengths, concerns, and fit when the evidence supports it.
         - If detail level is detailed: provide chronological, specific event breakdown and avoid hand-wavy summary language.
         - If detail level is detailed:
           - answer must start with a one-paragraph summary and then a "Timeline" section,
