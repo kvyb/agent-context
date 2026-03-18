@@ -511,6 +511,8 @@ final class OpenRouterClient: @unchecked Sendable {
         - If user provides explicit dates (for example 2026-03-10 to 2026-03-14), preserve those exact day boundaries in timeframe.
         - Resolve relative dates using provided local time context and timezone.
         - For detailed/timeline/report requests, produce query variants that maximize evidence recall across the requested period.
+        - If the question explicitly asks for dimensions or aspects (for example projects, blockers, people involved, decisions, fit), make sure the plan covers each requested dimension.
+        - Keep the plan query-driven; do not rely on canned task-specific templates.
         - Never answer the user question here.
         """
 
@@ -618,15 +620,20 @@ final class OpenRouterClient: @unchecked Sendable {
         - If sources conflict, state the conflict explicitly and lower confidence.
         - Keep the answer focused on the entities/topics explicitly asked in the question; skip unrelated memories.
         - answer should directly address the user's question.
+        - Infer the best answer structure from the question itself.
+        - If the user explicitly names dimensions or aspects, address each of those dimensions directly.
+        - Use short headings only when they mirror the user's requested dimensions or materially improve clarity.
+        - Do not force canned task-specific templates.
+        - If the user asks for an assessment, judgment, or opinion, provide a clearly provisional evidence-backed judgment instead of avoiding the question.
         - key_points: factual bullets.
         - supporting_events: short event lines with timestamps/apps when available.
         - If evidence is weak or missing for parts of the question, set insufficient_evidence=true and state limits.
         - Treat explicit dates as hard constraints.
-        - If the user asks for interview or candidate evaluation, explicitly cover questions answered, strengths, concerns, and fit when the evidence supports it.
         - If detail level is detailed: provide chronological, specific event breakdown and avoid hand-wavy summary language.
         - If detail level is detailed:
-          - answer must start with a one-paragraph summary and then a "Timeline" section,
-          - answer must include a date/time ordered breakdown (oldest -> newest),
+          - answer must start with a one-paragraph summary,
+          - choose chronology or topical grouping based on what the user asked for,
+          - include date/time ordered breakdown (oldest -> newest) when the question is timeline-oriented or asks for a date-window summary,
           - each timeline bullet should start with [YYYY-MM-DD HH:mm] when timestamp is present,
           - include concrete actions, changes, outcomes, and open follow-ups,
           - include concrete artifacts when present (files, commands, URLs, errors, PRs/issues, model names, settings keys),
@@ -771,11 +778,21 @@ final class OpenRouterClient: @unchecked Sendable {
         let semaphore = DispatchSemaphore(value: 0)
         let box = NetworkResponseBox()
 
-        URLSession.shared.dataTask(with: request) { data, response, error in
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
             box.set(data: data, error: error, statusCode: (response as? HTTPURLResponse)?.statusCode)
             semaphore.signal()
-        }.resume()
-        semaphore.wait()
+        }
+        task.resume()
+
+        let waitResult = semaphore.wait(timeout: .now() + timeoutSeconds + 1)
+        if waitResult == .timedOut {
+            task.cancel()
+            throw NSError(
+                domain: "OpenRouterClient",
+                code: 12,
+                userInfo: [NSLocalizedDescriptionKey: "Request timed out after \(String(format: "%.1f", timeoutSeconds))s"]
+            )
+        }
 
         let snapshot = box.snapshot()
         let responseData = snapshot.data

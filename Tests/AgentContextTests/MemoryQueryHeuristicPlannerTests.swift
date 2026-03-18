@@ -10,7 +10,8 @@ final class MemoryQueryHeuristicPlannerTests: XCTestCase {
         )
 
         XCTAssertTrue(profile.prefersDetailedAnswer)
-        XCTAssertEqual(profile.requestedFacets, ["projects", "tasks", "takeaways", "blockers"])
+        XCTAssertEqual(profile.requestedDimensions, ["projects", "tasks", "takeaways", "struggles"])
+        XCTAssertTrue(profile.focusTerms.contains("manychat"))
     }
 
     func testDefaultPlanStepsIncludeFacetQueriesForAnalyticalQuestions() {
@@ -29,7 +30,7 @@ final class MemoryQueryHeuristicPlannerTests: XCTestCase {
         XCTAssertTrue(queries.contains("manychat projects"))
         XCTAssertTrue(queries.contains("manychat tasks"))
         XCTAssertTrue(queries.contains("manychat takeaways"))
-        XCTAssertTrue(queries.contains("manychat blockers"))
+        XCTAssertTrue(queries.contains("manychat struggles"))
     }
 
     func testQueryTermsStripExplicitDateNoise() {
@@ -53,6 +54,18 @@ final class MemoryQueryHeuristicPlannerTests: XCTestCase {
         )
 
         XCTAssertTrue(profile.prefersDetailedAnswer)
-        XCTAssertEqual(profile.requestedFacets, ["questions answered", "strengths", "weaknesses", "fit"])
+        XCTAssertTrue(profile.seeksEvaluation)
+        XCTAssertEqual(profile.requestedDimensions, ["questions answered", "strengths", "weaknesses", "fit"])
+    }
+
+    func testProfileExtractsGenericRequestedDimensions() {
+        let planner = MemoryQueryHeuristicPlanner(scopeParser: MemoryQueryScopeParser())
+
+        let profile = planner.profile(
+            for: "What were my main blockers this week in AI Core work? Include projects, people involved, and next steps."
+        )
+
+        XCTAssertEqual(profile.requestedDimensions, ["projects", "people involved", "next steps"])
+        XCTAssertTrue(profile.focusTerms.contains("core"))
     }
 }

@@ -363,6 +363,7 @@ final class MemoryQueryUseCaseTests: XCTestCase {
     }
 
     func testRelativeScopeIsNotBroadenedByPlanner() async {
+        let referenceNow = date(year: 2026, month: 3, day: 17, hour: 12)
         let semantic = FakeSemanticRetriever(hits: [])
         let lexical = FakeLexicalRetriever(hits: [
             sampleHit(id: "b1", source: .bm25Store, text: "Transcript summary: candidate discussed retrieval metrics", score: 0.9)
@@ -389,7 +390,8 @@ final class MemoryQueryUseCaseTests: XCTestCase {
             usageWriter: FakeUsageWriter(),
             scopeParser: MemoryQueryScopeParser(calendar: fixedCalendar),
             runtimeConfig: sampleRuntimeConfig(),
-            calendar: fixedCalendar
+            calendar: fixedCalendar,
+            referenceDateProvider: { referenceNow }
         )
 
         let result = await useCase.execute(
@@ -408,6 +410,110 @@ final class MemoryQueryUseCaseTests: XCTestCase {
         XCTAssertEqual(result.scope.label, "last night")
         XCTAssertEqual(result.scope.start, date(year: 2026, month: 3, day: 16, hour: 18))
         XCTAssertEqual(result.scope.end, date(year: 2026, month: 3, day: 17, hour: 6))
+    }
+
+    func testInterviewEvaluationFallbackBuildsStructuredAssessmentFromTranscriptEvidence() async {
+        let referenceNow = date(year: 2026, month: 3, day: 17, hour: 12)
+        let semantic = FakeSemanticRetriever(hits: [])
+        let lexical = FakeLexicalRetriever(hits: [
+            MemoryEvidenceHit(
+                id: "audio-1",
+                source: .bm25Store,
+                text: "Transcript summary: S1: We built a GraphRAG workflow over company reports and used a vector database when normal retrieval missed business relationships. S1: We evaluate retrieval quality with NDCG and an LLM judge.",
+                appName: "zoom.us",
+                project: "AI Core Team",
+                occurredAt: date(year: 2026, month: 3, day: 16, hour: 21),
+                metadata: [
+                    "artifact_kind": ArtifactKind.audio.rawValue,
+                    "has_transcript": "true"
+                ],
+                semanticScore: 0,
+                lexicalScore: 0.95,
+                hybridScore: 1.02
+            ),
+            MemoryEvidenceHit(
+                id: "audio-2",
+                source: .bm25Store,
+                text: "Transcript summary: S1: For production we monitor response distributions in Grafana and use A/B testing before broader rollout. S1: When requirements are fuzzy I clarify trade-offs with stakeholders and peers.",
+                appName: "Codex",
+                project: "AI Core Team",
+                occurredAt: date(year: 2026, month: 3, day: 16, hour: 21),
+                metadata: [
+                    "artifact_kind": ArtifactKind.audio.rawValue,
+                    "has_transcript": "true"
+                ],
+                semanticScore: 0,
+                lexicalScore: 0.92,
+                hybridScore: 0.99
+            ),
+            MemoryEvidenceHit(
+                id: "audio-3",
+                source: .bm25Store,
+                text: "Transcript summary: S1: I was not sure who owned one part of the legacy pipeline, so I would validate that in a follow-up before changing it.",
+                appName: "Orion",
+                project: "AI Core Team",
+                occurredAt: date(year: 2026, month: 3, day: 16, hour: 22),
+                metadata: [
+                    "artifact_kind": ArtifactKind.audio.rawValue,
+                    "has_transcript": "true"
+                ],
+                semanticScore: 0,
+                lexicalScore: 0.88,
+                hybridScore: 0.94
+            ),
+            MemoryEvidenceHit(
+                id: "meta-1",
+                source: .bm25Store,
+                text: "Telegram reminder to analyze the interview transcript later in OpenTulpa.",
+                appName: "Telegram",
+                project: "OpenTulpa",
+                occurredAt: date(year: 2026, month: 3, day: 16, hour: 23),
+                metadata: [:],
+                semanticScore: 0,
+                lexicalScore: 0.4,
+                hybridScore: 0.45
+            )
+        ])
+        let useCase = MemoryQueryUseCase(
+            semanticRetriever: semantic,
+            lexicalRetriever: lexical,
+            planner: FakePlanner(result: nil),
+            answerer: FakeAnswerer(result: nil),
+            usageWriter: FakeUsageWriter(),
+            scopeParser: MemoryQueryScopeParser(calendar: fixedCalendar),
+            runtimeConfig: sampleRuntimeConfig(),
+            calendar: fixedCalendar,
+            referenceDateProvider: { referenceNow }
+        )
+
+        let result = await useCase.execute(
+            request: MemoryQueryRequest(
+                question: "How well did the candidate from the zoom interview on 2026-03-16 match an intermediate level? What questions were answered, and what does the transcript suggest about strengths, weaknesses, and fit?",
+                outputFormat: .text,
+                options: MemoryQueryOptions(
+                    sources: [.bm25Store],
+                    scopeOverride: nil,
+                    maxResults: 6,
+                    timeoutSeconds: 10
+                )
+            )
+        )
+
+        XCTAssertTrue(result.answer.contains("Questions Answered:"))
+        XCTAssertTrue(result.answer.contains("Strengths:"))
+        XCTAssertTrue(result.answer.contains("Weaknesses:"))
+        XCTAssertTrue(result.answer.contains("Fit:"))
+        XCTAssertFalse(result.insufficientEvidence)
+        XCTAssertTrue(
+            result.answer.localizedCaseInsensitiveContains("evaluation")
+                || result.answer.localizedCaseInsensitiveContains("ranking metrics")
+                || result.answer.localizedCaseInsensitiveContains("ndcg")
+                || result.keyPoints.contains(where: {
+                    $0.localizedCaseInsensitiveContains("evaluation")
+                        || $0.localizedCaseInsensitiveContains("ndcg")
+                })
+        )
+        XCTAssertFalse(result.answer.contains("Telegram reminder"))
     }
 
     private func sampleUsage(id: String) -> LLMUsageEvent {

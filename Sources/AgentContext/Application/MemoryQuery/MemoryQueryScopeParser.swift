@@ -90,7 +90,7 @@ struct MemoryQueryScopeParser: Sendable {
             "what", "did", "do", "i", "in", "on", "at", "the", "a", "an", "for", "to",
             "of", "from", "and", "or", "my", "was", "were", "is", "are", "this", "that",
             "with", "during", "show", "me", "about", "when", "where", "how", "status",
-            "find",
+            "find", "based", "suggest", "suggests", "show", "shows",
             "week", "today", "yesterday", "month", "user", "between", "main", "many"
         ]
         let monthTokens: Set<String> = [

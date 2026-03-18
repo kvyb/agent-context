@@ -169,7 +169,7 @@ enum QueryCLICommand {
             guard let parsed = Double(raw), parsed > 0 else {
                 throw QueryCLIArgumentError.invalidNumber(flag: "--timeout", value: raw)
             }
-            timeoutSeconds = min(parsed, 30)
+            timeoutSeconds = min(parsed, 35)
         } else {
             timeoutSeconds = nil
         }

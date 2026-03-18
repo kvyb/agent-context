@@ -11,6 +11,7 @@ final class MemoryQueryUseCase: @unchecked Sendable {
     private let calendar: Calendar
     private let heuristicPlanner: MemoryQueryHeuristicPlanner
     private let fallbackAnswerBuilder: MemoryQueryFallbackAnswerBuilder
+    private let referenceDateProvider: @Sendable () -> Date
 
     init(
         semanticRetriever: SemanticMemoryRetrieving,
@@ -20,7 +21,8 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         usageWriter: UsageEventWriting,
         scopeParser: MemoryQueryScopeParser,
         runtimeConfig: MemoryQueryRuntimeConfig,
-        calendar: Calendar = .autoupdatingCurrent
+        calendar: Calendar = .autoupdatingCurrent,
+        referenceDateProvider: @escaping @Sendable () -> Date = Date.init
     ) {
         self.semanticRetriever = semanticRetriever
         self.lexicalRetriever = lexicalRetriever
@@ -32,6 +34,7 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         self.calendar = calendar
         self.heuristicPlanner = MemoryQueryHeuristicPlanner(scopeParser: scopeParser)
         self.fallbackAnswerBuilder = MemoryQueryFallbackAnswerBuilder(calendar: calendar)
+        self.referenceDateProvider = referenceDateProvider
     }
 
     func execute(request: MemoryQueryRequest) async -> MemoryQueryResult {
@@ -40,10 +43,10 @@ final class MemoryQueryUseCase: @unchecked Sendable {
             return emptyQueryResult(for: request.question)
         }
 
-        let now = Date()
+        let now = referenceDateProvider()
         let timeZone = calendar.timeZone
         let fallbackScope = request.options.scopeOverride ?? scopeParser.inferScope(for: trimmed, referenceDate: now)
-        let deadline = now.addingTimeInterval(effectiveOverallTimeout(for: request.options))
+        let deadline = Date().addingTimeInterval(effectiveOverallTimeout(for: request.options))
         let queryProfile = heuristicPlanner.profile(for: trimmed)
 
         var detailLevel: MemoryQueryDetailLevel = queryProfile.prefersDetailedAnswer ? .detailed : .concise
@@ -266,7 +269,7 @@ final class MemoryQueryUseCase: @unchecked Sendable {
 
     private func effectiveOverallTimeout(for options: MemoryQueryOptions) -> TimeInterval {
         let requested = options.timeoutSeconds ?? runtimeConfig.timeoutSeconds
-        return min(30, max(5, requested))
+        return min(35, max(5, requested))
     }
 
     private func remainingSeconds(until deadline: Date) -> TimeInterval {

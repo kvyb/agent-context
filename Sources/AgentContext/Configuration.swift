@@ -89,7 +89,7 @@ struct TrackerConfig: Sendable {
             timeoutSeconds: max(15, TimeInterval(env["AGENT_CONTEXT_OPENROUTER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 90))
         )
         let memoryQuery = MemoryQueryRuntimeConfig(
-            timeoutSeconds: min(30, max(5, TimeInterval(env["AGENT_CONTEXT_MEMORY_QUERY_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 20))),
+            timeoutSeconds: min(35, max(5, TimeInterval(env["AGENT_CONTEXT_MEMORY_QUERY_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 20))),
             plannerTimeoutSeconds: min(12, max(2, TimeInterval(env["AGENT_CONTEXT_MEMORY_QUERY_PLANNER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 6))),
             answerTimeoutSeconds: min(12, max(2, TimeInterval(env["AGENT_CONTEXT_MEMORY_QUERY_ANSWER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 6))),
             semanticSearchTimeoutSeconds: min(10, max(2, TimeInterval(env["AGENT_CONTEXT_MEM0_SEARCH_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 6)))

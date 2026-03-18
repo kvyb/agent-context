@@ -3,47 +3,29 @@ import Foundation
 struct QueryIntentProfile: Sendable {
     let prefersLexicalFirst: Bool
     let prefersDetailedAnswer: Bool
-    let requestedFacets: [String]
+    let requestedDimensions: [String]
+    let seeksEvaluation: Bool
+    let focusTerms: [String]
 }
 
 struct MemoryQueryHeuristicPlanner: Sendable {
     private let scopeParser: MemoryQueryScopeParser
+    private let questionAnalyzer: MemoryQueryQuestionAnalyzer
 
     init(scopeParser: MemoryQueryScopeParser) {
         self.scopeParser = scopeParser
+        self.questionAnalyzer = MemoryQueryQuestionAnalyzer(scopeParser: scopeParser)
     }
 
     func profile(for question: String) -> QueryIntentProfile {
-        let lowered = question.lowercased()
-        let transcriptLikeTerms = ["transcript", "interview", "meeting", "zoom", "call", "candidate", "notetaker"]
-        let prefersLexicalFirst = transcriptLikeTerms.contains { lowered.contains($0) }
-
-        let detailedTerms = [
-            "timeline",
-            "projects",
-            "tasks",
-            "takeaways",
-            "struggles",
-            "blockers",
-            "strengths",
-            "weaknesses",
-            "fit",
-            "match",
-            "level",
-            "questions answered",
-            "questions",
-            "everything",
-            "comprehensive",
-            "summarize",
-            "summary"
-        ]
-        let prefersDetailedAnswer = scopeParser.hasExplicitDate(in: question)
-            || detailedTerms.contains { lowered.contains($0) }
+        let analysis = questionAnalyzer.analyze(question: question)
 
         return QueryIntentProfile(
-            prefersLexicalFirst: prefersLexicalFirst,
-            prefersDetailedAnswer: prefersDetailedAnswer,
-            requestedFacets: requestedFacets(for: lowered)
+            prefersLexicalFirst: analysis.prefersLexicalFirst,
+            prefersDetailedAnswer: analysis.prefersDetailedAnswer,
+            requestedDimensions: analysis.requestedDimensions,
+            seeksEvaluation: analysis.seeksEvaluation,
+            focusTerms: analysis.focusTerms
         )
     }
 
@@ -141,8 +123,8 @@ struct MemoryQueryHeuristicPlanner: Sendable {
         add(anchorQuery)
 
         if profile.prefersDetailedAnswer {
-            for facet in profile.requestedFacets {
-                add([anchorQuery, facet].filter { !$0.isEmpty }.joined(separator: " "))
+            for dimension in profile.requestedDimensions {
+                add([anchorQuery, dimension].filter { !$0.isEmpty }.joined(separator: " "))
             }
         }
 
@@ -175,40 +157,12 @@ struct MemoryQueryHeuristicPlanner: Sendable {
         return Array(queries.prefix(profile.prefersDetailedAnswer ? 8 : 6))
     }
 
-    private func requestedFacets(for loweredQuestion: String) -> [String] {
-        var facets: [String] = []
-        if loweredQuestion.contains("project") {
-            facets.append("projects")
-        }
-        if loweredQuestion.contains("task") {
-            facets.append("tasks")
-        }
-        if loweredQuestion.contains("takeaway") || loweredQuestion.contains("learning") {
-            facets.append("takeaways")
-        }
-        if loweredQuestion.contains("struggle") || loweredQuestion.contains("blocker") || loweredQuestion.contains("problem") {
-            facets.append("blockers")
-        }
-        if loweredQuestion.contains("question") {
-            facets.append("questions answered")
-        }
-        if loweredQuestion.contains("strength") {
-            facets.append("strengths")
-        }
-        if loweredQuestion.contains("weakness") {
-            facets.append("weaknesses")
-        }
-        if loweredQuestion.contains("fit") || loweredQuestion.contains("match") || loweredQuestion.contains("level") {
-            facets.append("fit")
-        }
-        return facets
-    }
-
     private func anchorTokens(from tokens: [String]) -> [String] {
         let facetTokens: Set<String> = [
             "project", "projects", "task", "tasks", "takeaway", "takeaways",
             "learning", "learnings", "struggle", "struggles", "blocker", "blockers",
-            "problem", "problems", "summary", "summarize", "timeline"
+            "problem", "problems", "summary", "summarize", "summarise", "timeline",
+            "bugs", "decisions", "issues", "people", "steps"
         ]
         let filtered = tokens.filter { !facetTokens.contains($0) }
         return filtered.isEmpty ? tokens : filtered
