@@ -97,10 +97,13 @@ private func makeMem0ProcessEnvironment(
         ?? normalizedMem0EnvironmentValue(env["AGENT_CONTEXT_OPENROUTER_TEXT_MODEL"])
         ?? normalizedMem0EnvironmentValue(env["AGENT_CONTEXT_OPENROUTER_MODEL"]) {
         env["AGENT_CONTEXT_MEM0_LLM_MODEL"] = model
+        env["AGENT_CONTEXT_MEM0_RERANK_MODEL"] = env["AGENT_CONTEXT_MEM0_RERANK_MODEL"] ?? model
     }
 
     env["OPENAI_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"]
     env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] = env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] ?? "openai/text-embedding-3-small"
+    env["AGENT_CONTEXT_MEM0_RERANK_TOP_K"] = env["AGENT_CONTEXT_MEM0_RERANK_TOP_K"] ?? "6"
+    env["AGENT_CONTEXT_MEM0_RERANK_MAX_TOKENS"] = env["AGENT_CONTEXT_MEM0_RERANK_MAX_TOKENS"] ?? "16"
     return env
 }
 

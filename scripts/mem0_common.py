@@ -25,6 +25,20 @@ def normalize_string(value: Any) -> str | None:
     return text or None
 
 
+def int_env(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw = os.getenv(name)
+    try:
+        value = int(raw) if raw is not None else default
+    except Exception:
+        value = default
+
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
 def unique_strings(values: Any) -> list[str]:
     if not isinstance(values, list):
         return []
@@ -127,6 +141,9 @@ def build_mem0_config() -> dict[str, Any]:
         os.getenv("AGENT_CONTEXT_OPENROUTER_MODEL", "google/gemini-3.1-flash-lite-preview"),
     )
     embed_model = os.getenv("AGENT_CONTEXT_MEM0_EMBED_MODEL", "openai/text-embedding-3-small")
+    rerank_model = os.getenv("AGENT_CONTEXT_MEM0_RERANK_MODEL", llm_model)
+    rerank_top_k = int_env("AGENT_CONTEXT_MEM0_RERANK_TOP_K", 6, minimum=1, maximum=12)
+    rerank_max_tokens = int_env("AGENT_CONTEXT_MEM0_RERANK_MAX_TOKENS", 16, minimum=4, maximum=64)
     api_key = (
         os.getenv("AGENT_CONTEXT_OPENROUTER_API_KEY")
         or os.getenv("OPENROUTER_API_KEY")
@@ -136,7 +153,7 @@ def build_mem0_config() -> dict[str, Any]:
     Path(qdrant_path).mkdir(parents=True, exist_ok=True)
     Path(history_db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    return {
+    config: dict[str, Any] = {
         "version": os.getenv("AGENT_CONTEXT_MEM0_VERSION", "v1.1"),
         "history_db_path": history_db_path,
         "vector_store": {
@@ -165,6 +182,32 @@ def build_mem0_config() -> dict[str, Any]:
             },
         },
     }
+
+    if api_key:
+        config["reranker"] = {
+            "provider": "llm_reranker",
+            "config": {
+                "provider": "openai",
+                "model": rerank_model,
+                "api_key": api_key,
+                "temperature": 0.0,
+                "max_tokens": rerank_max_tokens,
+                "top_k": rerank_top_k,
+                "scoring_prompt": (
+                    "Score how useful this memory is for answering an Agent Context query.\n"
+                    "Prefer memories that directly match the same project, people, app, timeframe, "
+                    "and concrete work details.\n"
+                    "Penalize adjacent projects, vague summaries, reminders, and notes about analyzing "
+                    "something later instead of the thing itself.\n"
+                    "Return only a number from 0.0 to 1.0.\n\n"
+                    "Query: {query}\n"
+                    "Memory: {document}\n"
+                    "Score:"
+                ),
+            },
+        }
+
+    return config
 
 
 def build_memory_metadata(payload: dict[str, Any]) -> dict[str, Any]:

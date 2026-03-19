@@ -49,6 +49,79 @@ def parse_queries(payload: dict[str, Any]) -> list[str]:
     return output[:10]
 
 
+def query_prefers_keyword_coverage(query: str, payload: dict[str, Any]) -> bool:
+    text = query.strip()
+    if not text:
+        return False
+
+    if any(payload.get(key) for key in ["project", "projects", "app_name", "app_names", "categories"]):
+        return True
+
+    technical_markers = ["/", ".", "_", "-", "#", ":", "sql", "api", "llm", "rag", "ndcg", "pr "]
+    lowered = text.lower()
+    if any(marker in lowered for marker in technical_markers):
+        return True
+
+    tokens = [token for token in text.split() if token]
+    return any(any(char.isdigit() or char.isupper() for char in token) for token in tokens)
+
+
+def should_use_rerank(payload: dict[str, Any], final_limit: int) -> bool:
+    raw_queries = payload.get("queries")
+    query_count = len([item for item in raw_queries if isinstance(item, str) and item.strip()]) if isinstance(raw_queries, list) else 1
+    return query_count <= 2
+
+
+def rerank_candidate_limit(final_limit: int) -> int:
+    bounded_limit = max(1, min(final_limit, 100))
+    return min(max(bounded_limit + 2, 6), 8)
+
+
+def build_search_option_sets(
+    *,
+    query: str,
+    payload: dict[str, Any],
+    final_limit: int,
+    filters: dict[str, Any] | None,
+    supported_parameters: set[str],
+) -> list[dict[str, Any]]:
+    rerank_supported = "rerank" in supported_parameters and should_use_rerank(payload, final_limit)
+    keyword_supported = "keyword_search" in supported_parameters and query_prefers_keyword_coverage(query, payload)
+
+    option_sets: list[dict[str, Any]] = []
+    standard_limit = max(1, min(final_limit, 100))
+    expanded_limit = rerank_candidate_limit(standard_limit) if rerank_supported else standard_limit
+
+    def append_option(option: dict[str, Any]) -> None:
+        filtered_option = {key: value for key, value in option.items() if key in supported_parameters}
+        if filtered_option not in option_sets:
+            option_sets.append(filtered_option)
+
+    if filters and rerank_supported:
+        option: dict[str, Any] = {"limit": expanded_limit, "filters": filters, "rerank": True}
+        if keyword_supported:
+            option["keyword_search"] = True
+        append_option(option)
+
+    if filters:
+        option = {"limit": standard_limit, "filters": filters}
+        if keyword_supported:
+            option["keyword_search"] = True
+        append_option(option)
+
+    if rerank_supported:
+        option = {"limit": expanded_limit, "rerank": True}
+        if keyword_supported:
+            option["keyword_search"] = True
+        append_option(option)
+
+    if keyword_supported:
+        append_option({"limit": standard_limit, "keyword_search": True})
+
+    append_option({"limit": standard_limit})
+    return option_sets
+
+
 def parse_score(value: Any) -> float:
     if isinstance(value, (int, float)):
         return float(value)
@@ -139,24 +212,28 @@ def build_search_filters(payload: dict[str, Any], start: datetime | None, end: d
     return {"AND": clauses}
 
 
-def search_attempts(memory, query: str, limit: int, scope_kwargs: dict[str, Any], filters: dict[str, Any] | None) -> list[dict[str, Any]]:
+def search_attempts(
+    memory,
+    query: str,
+    payload: dict[str, Any],
+    limit: int,
+    scope_kwargs: dict[str, Any],
+    filters: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
     had_success = False
     last_error = None
     supported_parameters = set(inspect.signature(memory.search).parameters.keys())
 
-    option_sets: list[dict[str, Any]] = []
-    if filters:
-        option_sets.append({"filters": filters, "rerank": True})
-        option_sets.append({"filters": filters})
-    option_sets.append({"rerank": True})
-    option_sets.append({})
+    option_sets = build_search_option_sets(
+        query=query,
+        payload=payload,
+        final_limit=limit,
+        filters=filters,
+        supported_parameters=supported_parameters,
+    )
 
     for extra_kwargs in option_sets:
-        merged_kwargs = {**scope_kwargs, "limit": limit, **extra_kwargs}
-        merged_kwargs = {
-            key: value for key, value in merged_kwargs.items()
-            if key in supported_parameters
-        }
+        merged_kwargs = {**scope_kwargs, **extra_kwargs}
         attempts = [
             lambda kwargs=merged_kwargs: memory.search(query=query, **kwargs),
             lambda kwargs=merged_kwargs: memory.search(query, **kwargs),
@@ -191,6 +268,7 @@ def search_attempts(memory, query: str, limit: int, scope_kwargs: dict[str, Any]
 def call_search(
     memory,
     query: str,
+    payload: dict[str, Any],
     user_id: str,
     agent_id: str,
     limit: int,
@@ -213,7 +291,14 @@ def call_search(
         if key in seen:
             continue
         seen.add(key)
-        rows = search_attempts(memory, query=query, limit=limit, scope_kwargs=scope_kwargs, filters=filters)
+        rows = search_attempts(
+            memory,
+            query=query,
+            payload=payload,
+            limit=limit,
+            scope_kwargs=scope_kwargs,
+            filters=filters,
+        )
         if not rows:
             continue
         collected.extend(rows)
@@ -374,6 +459,7 @@ def main() -> int:
             raw_hits = call_search(
                 memory,
                 query=query,
+                payload=payload,
                 user_id=user_id,
                 agent_id=agent_id,
                 limit=limit,
