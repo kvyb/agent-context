@@ -29,12 +29,18 @@ struct OpenRouterCallResult: Sendable {
     let usage: LLMUsageEvent
 }
 
+enum MemoryQueryAnswerPromptMode {
+    case primary
+    case retry
+}
+
 final class OpenRouterClient: @unchecked Sendable {
     private let endpoint: URL
     private let multimodalModel: String
     private let audioModel: String
     private let textModel: String
     private let queryAgentModel: String
+    private let evaluationModel: String
     private let reasoningEffort: String
     private let timeoutSeconds: TimeInterval
     private let appNameHeader: String?
@@ -47,6 +53,7 @@ final class OpenRouterClient: @unchecked Sendable {
         audioModel = AppSettings.normalizedOpenRouterModel(settings.openRouterAudioModel.nilIfEmpty ?? multimodalModel)
         textModel = AppSettings.normalizedOpenRouterModel(settings.openRouterTextModel.nilIfEmpty ?? multimodalModel)
         queryAgentModel = "google/gemini-3-flash-preview"
+        evaluationModel = AppSettings.defaultOpenRouterModel
         reasoningEffort = config.reasoningEffort
         timeoutSeconds = config.timeoutSeconds
         appNameHeader = settings.openRouterAppNameHeader
@@ -62,22 +69,36 @@ final class OpenRouterClient: @unchecked Sendable {
 
         let systemPrompt = """
         You are an evidence extractor for a work-log tracker analyzing a desktop screenshot.
-        Return strict JSON with keys: description, problem, success, user_contribution, suggestion_or_decision,
-        status, confidence, project, workspace, task, evidence, entities, insufficient_evidence.
+        Return strict JSON with keys: description, content_description, layout_description, problem, success, user_contribution, suggestion_or_decision,
+        status, confidence, project, workspace, task, evidence, salient_text, ui_elements, entities, insufficient_evidence.
         Rules:
         - Use only concrete facts visible in the screenshot.
         - Metadata fields (app/window/url/workspace/project) are hints only, never primary evidence.
         - task MUST capture the exact current work item in a short phrase (4-14 words) when inferable.
         - If a visible thread title, doc title, PR title, issue title, or heading exists, map task from it.
         - task should be outcome-oriented (e.g. \"implement durable backfill queue replay\", \"review OpenRouter pricing for embeddings\").
-        - description must be neutral/factual and always present.
-        - If readable content exists, description should contain 1-3 sentences and at least 2 concrete on-screen details
-          (filenames, command text, document titles, chat topics, UI labels, URLs, code symbols, settings labels).
+        - description must be a single dense sentence describing the current focal activity in at most 24 words.
+        - content_description must describe what is visibly on screen in 2-3 dense sentences, with no filler and no repeated context.
+        - content_description should mention concrete on-screen details such as filenames, commands, document titles, chat topics,
+          URLs, code symbols, settings labels, errors, buttons, PR titles, or message content when visible.
+        - layout_description must explain the screen layout and spatial structure in 1-2 tight sentences:
+          what panes, sidebars, editors, chats, browsers, terminals, dialogs, previews, or dashboards are visible and how they are arranged.
+        - salient_text must contain 3-6 short exact or near-exact snippets copied from the screen when readable
+          (titles, filenames, commands, errors, URLs, code symbols, issue titles, UI labels, headings).
+        - ui_elements must contain 2-8 visible UI objects or layout-aware screen objects with:
+          role, label, value, region.
+        - role should be things like editor, terminal, browser_tab, sidebar, button, input, heading, list, table, panel, chat_message,
+          code_symbol, error_banner, url_bar, file_tree, diff_hunk, preview_canvas.
+        - label should be the user-visible identifier of the object.
+        - value should contain the most important concise content for that object when visible.
+        - region should be a coarse location like top bar, left sidebar, center pane, right pane, bottom panel, modal, or floating popup.
         - Inference fields (problem, success, user_contribution, suggestion_or_decision) must be null when unsupported.
         - status must be one of: none, blocked, in_progress, resolved.
         - confidence is 0..1 and reflects confidence in inference fields.
         - project/workspace/task must be strings; use empty string when unknown.
-        - evidence should contain visible clues that support inference claims.
+        - evidence should contain 2-5 concise factual observations that support inference claims.
+        - Do not repeat the same wording across description, content_description, layout_description, salient_text, ui_elements, and evidence.
+        - Prefer compression over narration. Keep all text high-signal and information-dense.
         - Focus on task, document, page, file, workspace, project, and employer when visible.
         - Never hallucinate.
         - Do not mention Agent Context UI unless it is the active app itself.
@@ -108,7 +129,8 @@ final class OpenRouterClient: @unchecked Sendable {
         let payload: [String: Any] = [
             "model": model,
             "reasoning": ["effort": reasoningEffort],
-            "temperature": 0.1,
+            "temperature": 0.0,
+            "max_tokens": 380,
             "response_format": [
                 "type": "json_schema",
                 "json_schema": [
@@ -118,6 +140,8 @@ final class OpenRouterClient: @unchecked Sendable {
                         "type": "object",
                         "properties": [
                             "description": ["type": "string"],
+                            "content_description": ["type": "string"],
+                            "layout_description": ["type": "string"],
                             "problem": ["type": ["string", "null"]],
                             "success": ["type": ["string", "null"]],
                             "user_contribution": ["type": ["string", "null"]],
@@ -131,11 +155,28 @@ final class OpenRouterClient: @unchecked Sendable {
                             "workspace": ["type": "string"],
                             "task": ["type": "string"],
                             "evidence": ["type": "array", "items": ["type": "string"]],
+                            "salient_text": ["type": "array", "items": ["type": "string"]],
+                            "ui_elements": [
+                                "type": "array",
+                                "items": [
+                                    "type": "object",
+                                    "properties": [
+                                        "role": ["type": "string"],
+                                        "label": ["type": "string"],
+                                        "value": ["type": ["string", "null"]],
+                                        "region": ["type": ["string", "null"]]
+                                    ],
+                                    "required": ["role", "label", "value", "region"],
+                                    "additionalProperties": false
+                                ]
+                            ],
                             "entities": ["type": "array", "items": ["type": "string"]],
                             "insufficient_evidence": ["type": "boolean"]
                         ],
                         "required": [
                             "description",
+                            "content_description",
+                            "layout_description",
                             "problem",
                             "success",
                             "user_contribution",
@@ -146,6 +187,8 @@ final class OpenRouterClient: @unchecked Sendable {
                             "workspace",
                             "task",
                             "evidence",
+                            "salient_text",
+                            "ui_elements",
                             "entities",
                             "insufficient_evidence"
                         ],
@@ -270,11 +313,13 @@ final class OpenRouterClient: @unchecked Sendable {
         let model = textModel
         let evidenceLines = evidence.map { record in
             let analysis = record.analysis?.summary ?? "pending artifact analysis"
+            let contentDescription = record.analysis?.contentDescription ?? ""
+            let salientText = record.analysis?.salientText.prefix(4).joined(separator: " ; ") ?? ""
             let entities = record.analysis?.entities.joined(separator: ",") ?? ""
             let task = record.analysis?.task ?? ""
             let project = record.analysis?.project ?? ""
             let workspace = record.analysis?.workspace ?? ""
-            return "- [\(iso8601(record.metadata.capturedAt))] id=\(record.metadata.id) \(record.metadata.kind.rawValue): \(analysis) | task=\(task) | project=\(project) | workspace=\(workspace) | entities=\(entities)"
+            return "- [\(iso8601(record.metadata.capturedAt))] id=\(record.metadata.id) \(record.metadata.kind.rawValue): \(analysis) | content=\(contentDescription) | salient=\(salientText) | task=\(task) | project=\(project) | workspace=\(workspace) | entities=\(entities)"
         }.joined(separator: "\n")
 
         let timelineLines = timeline
@@ -293,10 +338,12 @@ final class OpenRouterClient: @unchecked Sendable {
         - Keep summary dry, concise, project-oriented.
         - Never hallucinate.
         - task_segments should represent semantic work units in this interval.
-        - Each segment must include: task, issue_or_goal, actions, outcome, next_step, status, confidence, evidence_refs.
+        - Each segment must include: task, issue_or_goal, actions, outcome, next_step, people, blocker, status, confidence, evidence_refs.
         - status must be one of: done, in_progress, pending, blocked.
         - confidence is 0..1.
         - evidence_refs should cite evidence IDs/timestamps from the provided list when possible.
+        - people should list specific people mentioned or visible in the evidence when relevant, else [].
+        - blocker should be the concrete blocking issue when status=blocked, else empty string.
         - Use empty strings or [] for unknown optional fields.
         """
 
@@ -335,6 +382,8 @@ final class OpenRouterClient: @unchecked Sendable {
                                         "actions": ["type": "array", "items": ["type": "string"]],
                                         "outcome": ["type": "string"],
                                         "next_step": ["type": "string"],
+                                        "people": ["type": "array", "items": ["type": "string"]],
+                                        "blocker": ["type": "string"],
                                         "status": ["type": "string", "enum": ["done", "in_progress", "pending", "blocked"]],
                                         "confidence": ["type": "number"],
                                         "evidence_refs": ["type": "array", "items": ["type": "string"]],
@@ -348,7 +397,7 @@ final class OpenRouterClient: @unchecked Sendable {
                                         "entities": ["type": "array", "items": ["type": "string"]]
                                     ],
                                     "required": [
-                                        "task", "issue_or_goal", "actions", "outcome", "next_step",
+                                        "task", "issue_or_goal", "actions", "outcome", "next_step", "people", "blocker",
                                         "status", "confidence", "evidence_refs", "project", "workspace",
                                         "repo", "document", "url", "app_name", "bundle_id", "entities"
                                     ],
@@ -400,9 +449,11 @@ final class OpenRouterClient: @unchecked Sendable {
         - Mention projects/workspaces only when evidence supports it.
         - If evidence is insufficient, explicitly use \"insufficient evidence\".
         - task_segments should summarize cross-app meaningful work outcomes for this hour.
-        - Each segment must include: task, issue_or_goal, actions, outcome, next_step, status, confidence, evidence_refs.
+        - Each segment must include: task, issue_or_goal, actions, outcome, next_step, people, blocker, status, confidence, evidence_refs.
         - status must be one of: done, in_progress, pending, blocked.
         - confidence is 0..1.
+        - people should list specific people mentioned or coordinated with when present, else [].
+        - blocker should be the concrete blocking issue when status=blocked, else empty string.
         """
 
         let userPrompt = """
@@ -439,6 +490,8 @@ final class OpenRouterClient: @unchecked Sendable {
                                         "actions": ["type": "array", "items": ["type": "string"]],
                                         "outcome": ["type": "string"],
                                         "next_step": ["type": "string"],
+                                        "people": ["type": "array", "items": ["type": "string"]],
+                                        "blocker": ["type": "string"],
                                         "status": ["type": "string", "enum": ["done", "in_progress", "pending", "blocked"]],
                                         "confidence": ["type": "number"],
                                         "evidence_refs": ["type": "array", "items": ["type": "string"]],
@@ -452,7 +505,7 @@ final class OpenRouterClient: @unchecked Sendable {
                                         "entities": ["type": "array", "items": ["type": "string"]]
                                     ],
                                     "required": [
-                                        "task", "issue_or_goal", "actions", "outcome", "next_step",
+                                        "task", "issue_or_goal", "actions", "outcome", "next_step", "people", "blocker",
                                         "status", "confidence", "evidence_refs", "project", "workspace",
                                         "repo", "document", "url", "app_name", "bundle_id", "entities"
                                     ],
@@ -604,46 +657,73 @@ final class OpenRouterClient: @unchecked Sendable {
         question: String,
         scope: MemoryQueryScope,
         detailLevel: MemoryQueryDetailLevel,
+        fullContextMode: Bool,
         now: Date,
         timeZone: TimeZone,
         mem0EvidenceLines: [String],
         bm25EvidenceLines: [String],
+        promptMode: MemoryQueryAnswerPromptMode = .primary,
         apiKey: String
     ) throws -> OpenRouterCallResult {
-        let systemPrompt = """
-        You answer memory questions using only retrieved evidence from two retrieval sources.
-        Return strict JSON with keys: answer, key_points, supporting_events, insufficient_evidence.
-        Rules:
-        - Use only provided evidence; never invent facts.
-        - There are two sources: MEM0_SEMANTIC and BM25_STORAGE.
-        - Prefer facts that appear in both sources when possible.
-        - If sources conflict, state the conflict explicitly and lower confidence.
-        - Keep the answer focused on the entities/topics explicitly asked in the question; skip unrelated memories.
-        - answer should directly address the user's question.
-        - Infer the best answer structure from the question itself.
-        - If the user explicitly names dimensions or aspects, address each of those dimensions directly.
-        - Use short headings only when they mirror the user's requested dimensions or materially improve clarity.
-        - Do not force canned task-specific templates.
-        - If the user asks for an assessment, judgment, or opinion, provide a clearly provisional evidence-backed judgment instead of avoiding the question.
-        - key_points: factual bullets.
-        - supporting_events: short event lines with timestamps/apps when available.
-        - If evidence is weak or missing for parts of the question, set insufficient_evidence=true and state limits.
-        - Treat explicit dates as hard constraints.
-        - If detail level is detailed: provide chronological, specific event breakdown and avoid hand-wavy summary language.
-        - If detail level is detailed:
-          - answer must start with a one-paragraph summary,
-          - choose chronology or topical grouping based on what the user asked for,
-          - include date/time ordered breakdown (oldest -> newest) when the question is timeline-oriented or asks for a date-window summary,
-          - each timeline bullet should start with [YYYY-MM-DD HH:mm] when timestamp is present,
-          - include concrete actions, changes, outcomes, and open follow-ups,
-          - include concrete artifacts when present (files, commands, URLs, errors, PRs/issues, model names, settings keys),
-          - avoid vague phrases like "worked on stuff" or "made progress",
-          - key_points should usually be 8-30 items,
-          - supporting_events should usually be 12-120 items when evidence exists.
-        - If detail level is concise:
-          - keep key_points around 3-8 and supporting_events around 4-16.
-        - If requested scope is broad but evidence is sparse, be explicit about gaps by day or topic.
-        """
+        let systemPrompt: String
+        let maxTokens: Int
+        switch promptMode {
+        case .primary:
+            systemPrompt = """
+            You answer memory questions using only retrieved evidence from two retrieval sources.
+            Return strict JSON with keys: answer, key_points, supporting_events, insufficient_evidence.
+            Rules:
+            - Use only provided evidence; never invent facts.
+            - There are two sources: MEM0_SEMANTIC and BM25_STORAGE.
+            - Prefer facts that appear in both sources when possible.
+            - If sources conflict, state the conflict explicitly and lower confidence.
+            - Keep the answer focused on the entities/topics explicitly asked in the question; skip unrelated memories.
+            - answer should directly address the user's question.
+            - Infer the best answer structure from the question itself.
+            - If the user explicitly names dimensions or aspects, address each of those dimensions directly.
+            - Use short headings only when they mirror the user's requested dimensions or materially improve clarity.
+            - Do not force canned task-specific templates.
+            - If the user asks for an assessment, judgment, or opinion, provide a clearly provisional evidence-backed judgment instead of avoiding the question.
+            - When transcript_chunk evidence is present, treat it as the primary source of truth and ground judgments in those excerpts rather than in higher-level summaries.
+            - For assessment or fit questions, each major judgment should be supported by one or more concrete retrieved exchanges, answers, or actions.
+            - Avoid generic praise or criticism unless it is tied to explicit retrieved evidence.
+            - key_points: factual bullets.
+            - supporting_events: short event lines with timestamps/apps when available.
+            - If evidence is weak or missing for parts of the question, set insufficient_evidence=true and state limits.
+            - Treat explicit dates as hard constraints.
+            - Keep the full JSON response under roughly 2000 tokens.
+            - If detail level is detailed: provide chronological, specific event breakdown and avoid hand-wavy summary language.
+            - If full-context mode is true, treat the provided evidence as the full scoped corpus and synthesize comprehensively instead of only selecting a few highlights.
+            - If detail level is detailed:
+              - answer must start with a one-paragraph summary,
+              - choose chronology or topical grouping based on what the user asked for,
+              - include date/time ordered breakdown (oldest -> newest) when the question is timeline-oriented or asks for a date-window summary,
+              - each timeline bullet should start with [YYYY-MM-DD HH:mm] when timestamp is present,
+              - include concrete actions, changes, outcomes, and open follow-ups,
+              - include concrete artifacts when present (files, commands, URLs, errors, PRs/issues, model names, settings keys),
+              - avoid vague phrases like "worked on stuff" or "made progress",
+              - key_points should usually be 8-30 items,
+              - supporting_events should usually be 12-120 items when evidence exists.
+            - If detail level is concise:
+              - keep key_points around 3-8 and supporting_events around 4-16.
+            - If requested scope is broad but evidence is sparse, be explicit about gaps by day or topic.
+            """
+            maxTokens = 1800
+        case .retry:
+            systemPrompt = """
+            Return exactly one JSON object with keys: answer, key_points, supporting_events, insufficient_evidence.
+            Rules:
+            - Output JSON only. No markdown, no preamble, no code fences.
+            - Use only the provided evidence.
+            - answer: 1-4 short paragraphs that directly answer the question with concrete evidence.
+            - key_points: 3-10 factual strings.
+            - supporting_events: 4-16 short timestamped strings when evidence exists.
+            - insufficient_evidence: boolean.
+            - For interview or transcript questions, ground judgments in concrete exchanges or answers from transcript chunks.
+            - Keep the whole response compact and under roughly 1500 tokens.
+            """
+            maxTokens = 1400
+        }
 
         let scopeText = scope.label?.nilIfEmpty ?? "unspecified"
         let scopeStartText = scope.start.map(iso8601) ?? ""
@@ -654,6 +734,8 @@ final class OpenRouterClient: @unchecked Sendable {
         Current UTC time: \(iso8601(now))
         Current local time (\(timeZone.identifier)): \(localTimestamp(now, timeZone: timeZone))
         Detail level: \(detailLevel.rawValue)
+        Full-context mode: \(fullContextMode ? "true" : "false")
+        Prompt mode: \(promptMode == .retry ? "retry" : "primary")
         Scope: \(scopeText)
         Scope start: \(scopeStartText)
         Scope end: \(scopeEndText)
@@ -670,6 +752,7 @@ final class OpenRouterClient: @unchecked Sendable {
             "model": queryAgentModel,
             "reasoning": ["effort": reasoningEffort],
             "temperature": 0.1,
+            "max_tokens": maxTokens,
             "response_format": [
                 "type": "json_schema",
                 "json_schema": [
@@ -704,6 +787,147 @@ final class OpenRouterClient: @unchecked Sendable {
             payload: payload,
             models: preferredQueryModels(),
             kind: "memory_query_answer",
+            apiKey: apiKey
+        )
+    }
+
+    func evaluateMemoryQuery(
+        question: String,
+        answer: String,
+        answerOrigin: MemoryQueryAnswerOrigin,
+        latencySeconds: TimeInterval,
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel,
+        mem0EvidenceLines: [String],
+        bm25EvidenceLines: [String],
+        keyPoints: [String],
+        supportingEvents: [String],
+        apiKey: String
+    ) throws -> OpenRouterCallResult {
+        let systemPrompt = """
+        You are grading a memory-query system.
+        Return strict JSON only with keys:
+        overall_score,
+        query_alignment_score,
+        retrieval_relevance_score,
+        retrieval_coverage_score,
+        groundedness_score,
+        answer_completeness_score,
+        summary,
+        retrieval_explanation,
+        groundedness_explanation,
+        answer_quality_explanation,
+        strengths,
+        weaknesses,
+        improvement_actions,
+        evidence_gaps.
+
+        Rules:
+        - Score query_alignment_score, retrieval_relevance_score, retrieval_coverage_score, groundedness_score, and answer_completeness_score on a strict 1-5 scale.
+        - Score overall_score on a strict 0-100 scale.
+        - Grade retrieval based on whether the retrieved evidence is relevant, focused, and sufficient for the user question.
+        - Grade groundedness based on whether the final answer is directly supported by the retrieved evidence.
+        - Grade answer completeness based on whether the answer addresses the user question and requested dimensions.
+        - Penalize off-topic retrieval, duplicated evidence, vague claims, unsupported judgments, metadata-only summaries, and missing requested dimensions.
+        - Be strict but fair.
+        - Each explanation must be concrete and mention what evidence supports the score.
+        - Keep the response compact: summary <= 70 words; each explanation <= 90 words.
+        - strengths, weaknesses, improvement_actions, and evidence_gaps must each contain 2-4 concise items.
+        - Each list item should be one short sentence fragment, ideally <= 18 words.
+        - improvement_actions should be actionable engineering recommendations for retrieval, ranking, prompting, or synthesis.
+        - Never invent missing evidence.
+        """
+
+        let scopeText = scope.label?.nilIfEmpty ?? "unspecified"
+        let scopeStartText = scope.start.map(iso8601) ?? ""
+        let scopeEndText = scope.end.map(iso8601) ?? ""
+        let mem0Text = mem0EvidenceLines.isEmpty ? "- none" : mem0EvidenceLines.joined(separator: "\n")
+        let bm25Text = bm25EvidenceLines.isEmpty ? "- none" : bm25EvidenceLines.joined(separator: "\n")
+        let keyPointsText = keyPoints.isEmpty ? "- none" : keyPoints.map { "- \($0)" }.joined(separator: "\n")
+        let supportingEventsText = supportingEvents.isEmpty ? "- none" : supportingEvents.map { "- \($0)" }.joined(separator: "\n")
+        let userPrompt = """
+        User question: \(question)
+        Scope: \(scopeText)
+        Scope start: \(scopeStartText)
+        Scope end: \(scopeEndText)
+        Detail level: \(detailLevel.rawValue)
+        Query latency seconds: \(String(format: "%.2f", latencySeconds))
+        Answer origin: \(answerOrigin.rawValue)
+
+        Final answer:
+        \(answer)
+
+        Final key points:
+        \(keyPointsText)
+
+        Final supporting events:
+        \(supportingEventsText)
+
+        MEM0_SEMANTIC evidence:
+        \(mem0Text)
+
+        BM25_STORAGE evidence:
+        \(bm25Text)
+        """
+
+        let payload: [String: Any] = [
+            "model": evaluationModel,
+            "reasoning": ["effort": "low"],
+            "temperature": 0.0,
+            "max_tokens": 900,
+            "response_format": [
+                "type": "json_schema",
+                "json_schema": [
+                    "name": "memory_query_evaluation",
+                    "strict": true,
+                    "schema": [
+                        "type": "object",
+                        "properties": [
+                            "overall_score": ["type": "integer", "minimum": 0, "maximum": 100],
+                            "query_alignment_score": ["type": "integer", "minimum": 1, "maximum": 5],
+                            "retrieval_relevance_score": ["type": "integer", "minimum": 1, "maximum": 5],
+                            "retrieval_coverage_score": ["type": "integer", "minimum": 1, "maximum": 5],
+                            "groundedness_score": ["type": "integer", "minimum": 1, "maximum": 5],
+                            "answer_completeness_score": ["type": "integer", "minimum": 1, "maximum": 5],
+                            "summary": ["type": "string"],
+                            "retrieval_explanation": ["type": "string"],
+                            "groundedness_explanation": ["type": "string"],
+                            "answer_quality_explanation": ["type": "string"],
+                            "strengths": ["type": "array", "items": ["type": "string"], "minItems": 2, "maxItems": 4],
+                            "weaknesses": ["type": "array", "items": ["type": "string"], "minItems": 2, "maxItems": 4],
+                            "improvement_actions": ["type": "array", "items": ["type": "string"], "minItems": 2, "maxItems": 4],
+                            "evidence_gaps": ["type": "array", "items": ["type": "string"], "minItems": 2, "maxItems": 4]
+                        ],
+                        "required": [
+                            "overall_score",
+                            "query_alignment_score",
+                            "retrieval_relevance_score",
+                            "retrieval_coverage_score",
+                            "groundedness_score",
+                            "answer_completeness_score",
+                            "summary",
+                            "retrieval_explanation",
+                            "groundedness_explanation",
+                            "answer_quality_explanation",
+                            "strengths",
+                            "weaknesses",
+                            "improvement_actions",
+                            "evidence_gaps"
+                        ],
+                        "additionalProperties": false
+                    ]
+                ]
+            ],
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": userPrompt]
+            ]
+        ]
+
+        return try callWithFallbackModels(
+            payload: payload,
+            models: [evaluationModel],
+            kind: "memory_query_evaluation",
             apiKey: apiKey
         )
     }
@@ -1004,728 +1228,4 @@ final class OpenRouterClient: @unchecked Sendable {
         ]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }()
-}
-
-func decodeArtifactAnalysis(
-    from text: String,
-    fallbackProject: String? = nil,
-    fallbackWorkspace: String? = nil,
-    fallbackTaskHint: String? = nil
-) -> ArtifactAnalysis {
-    if let object = parseArtifactJSON(text) {
-        let transcript = objectString(object, keys: ["transcript"])
-        var description = normalizeArtifactField(
-            objectString(object, keys: ["description", "summary"])
-        ) ?? "insufficient evidence"
-        description = sanitizeSummaryPhrasing(description)
-
-        var project = normalizeArtifactField(objectString(object, keys: ["project"])) ?? fallbackProject?.nilIfEmpty
-        var workspace = normalizeArtifactField(objectString(object, keys: ["workspace"])) ?? fallbackWorkspace?.nilIfEmpty
-        var task = normalizeTask(objectString(object, keys: ["task"]))
-        let evidence = uniqueStrings(object["evidence"] as? [String] ?? [])
-        var entities = uniqueStrings(object["entities"] as? [String] ?? [])
-        var problem = normalizeArtifactField(objectString(object, keys: ["problem"]))
-        var success = normalizeArtifactField(objectString(object, keys: ["success"]))
-        let userContribution = normalizeArtifactField(objectString(object, keys: ["user_contribution", "userContribution"]))
-        let suggestionOrDecision = normalizeArtifactField(
-            objectString(object, keys: ["suggestion_or_decision", "suggestionOrDecision"])
-        )
-        let confidence = object["confidence"] == nil ? 0 : clampConfidence(object["confidence"])
-        let insufficient = boolValue(object["insufficient_evidence"])
-            ?? boolValue(object["insufficientEvidence"])
-            ?? description.lowercased().contains("insufficient evidence")
-
-        if confidence < highConfidenceInferenceThreshold {
-            problem = nil
-            success = nil
-        }
-
-        if insufficient {
-            return ArtifactAnalysis(
-                description: "insufficient evidence",
-                problem: nil,
-                success: nil,
-                userContribution: nil,
-                suggestionOrDecision: nil,
-                status: .none,
-                confidence: 0,
-                summary: "insufficient evidence",
-                transcript: transcript,
-                entities: entities,
-                insufficientEvidence: true,
-                project: project,
-                workspace: workspace,
-                task: task,
-                evidence: []
-            )
-        }
-
-        let inferenceSeed = composeArtifactSummary(
-            description: description,
-            problem: problem,
-            success: success,
-            userContribution: userContribution,
-            suggestionOrDecision: suggestionOrDecision,
-            status: .none,
-            insufficient: false
-        )
-
-        task = normalizeTask(task)
-            ?? inferTask(summary: inferenceSeed, evidence: evidence, fallbackHint: fallbackTaskHint)
-
-        if project == nil {
-            project = inferProject(from: inferenceSeed, entities: entities)
-        }
-        if workspace == nil {
-            workspace = inferWorkspace(from: inferenceSeed, entities: entities)
-        }
-
-        if let project, !entities.contains(project) {
-            entities.append(project)
-        }
-        if let workspace, !entities.contains(workspace) {
-            entities.append(workspace)
-        }
-        if let task, !entities.contains(task) {
-            entities.append(task)
-        }
-
-        if description == "{" || description.count < 24 {
-            description = fallbackSummary(project: project, workspace: workspace, task: task, evidence: evidence) ?? description
-        }
-
-        var status = parseArtifactInferenceStatus(object["status"])
-        if status == .none {
-            if problem != nil {
-                status = .blocked
-            } else if success != nil {
-                status = .resolved
-            } else if userContribution != nil || suggestionOrDecision != nil || task != nil {
-                status = .inProgress
-            }
-        }
-
-        var summary = composeArtifactSummary(
-            description: description,
-            problem: problem,
-            success: success,
-            userContribution: userContribution,
-            suggestionOrDecision: suggestionOrDecision,
-            status: status,
-            insufficient: false
-        )
-        if let task, !summaryContainsTask(summary, task: task) {
-            summary = "Working on \(task). \(summary)"
-        }
-
-        return ArtifactAnalysis(
-            description: description,
-            problem: problem,
-            success: success,
-            userContribution: userContribution,
-            suggestionOrDecision: suggestionOrDecision,
-            status: status,
-            confidence: confidence,
-            summary: summary,
-            transcript: transcript,
-            entities: entities,
-            insufficientEvidence: false,
-            project: project,
-            workspace: workspace,
-            task: task,
-            evidence: evidence
-        )
-    }
-
-    let fallback = cleanedFreeformText(text) ?? "insufficient evidence"
-    let insufficient = fallback.lowercased().contains("insufficient evidence")
-    let description = insufficient ? "insufficient evidence" : sanitizeSummaryPhrasing(fallback)
-    let summary = composeArtifactSummary(
-        description: description,
-        problem: nil,
-        success: nil,
-        userContribution: nil,
-        suggestionOrDecision: nil,
-        status: .none,
-        insufficient: insufficient
-    )
-    return ArtifactAnalysis(
-        description: description,
-        problem: nil,
-        success: nil,
-        userContribution: nil,
-        suggestionOrDecision: nil,
-        status: .none,
-        confidence: 0,
-        summary: summary,
-        transcript: nil,
-        entities: [],
-        insufficientEvidence: insufficient,
-        project: nil,
-        workspace: nil,
-        task: nil,
-        evidence: []
-    )
-}
-
-func decodeStructuredSynthesis(
-    from text: String,
-    defaultTask: String? = nil,
-    defaultProject: String? = nil,
-    defaultWorkspace: String? = nil,
-    defaultAppName: String? = nil,
-    defaultBundleID: String? = nil
-) -> StructuredSynthesis {
-    guard let object = parseArtifactJSON(text) else {
-        let fallbackSummary = cleanedFreeformText(text) ?? "insufficient evidence"
-        let insufficient = fallbackSummary.lowercased().contains("insufficient evidence")
-        let fallbackSegment = fallbackTaskSegment(
-            summary: fallbackSummary,
-            defaultTask: defaultTask,
-            defaultProject: defaultProject,
-            defaultWorkspace: defaultWorkspace,
-            defaultAppName: defaultAppName,
-            defaultBundleID: defaultBundleID
-        )
-        return StructuredSynthesis(
-            summary: fallbackSummary,
-            entities: fallbackSegment.map { [$0.task] } ?? [],
-            insufficientEvidence: insufficient,
-            taskSegments: fallbackSegment.map { [$0] } ?? []
-        )
-    }
-
-    let summary = (object["summary"] as? String)?.nilIfEmpty ?? "insufficient evidence"
-    let insufficient = (object["insufficient_evidence"] as? Bool) ?? summary.lowercased().contains("insufficient evidence")
-    var entities = uniqueStrings(object["entities"] as? [String] ?? [])
-
-    var segments: [TaskSegmentDraft] = []
-    if let rawSegments = object["task_segments"] as? [[String: Any]] {
-        for raw in rawSegments {
-            let task = normalizeTask((raw["task"] as? String)?.nilIfEmpty)
-                ?? normalizeTask(defaultTask)
-                ?? inferTask(summary: summary, evidence: raw["evidence_refs"] as? [String] ?? [], fallbackHint: nil)
-                ?? "unknown task"
-
-            let issueOrGoal = normalizeTask((raw["issue_or_goal"] as? String)?.nilIfEmpty)
-            let actions = uniqueStrings(raw["actions"] as? [String] ?? [])
-            let outcome = normalizeTask((raw["outcome"] as? String)?.nilIfEmpty)
-            let nextStep = normalizeTask((raw["next_step"] as? String)?.nilIfEmpty)
-            let status = parseTaskSegmentStatus((raw["status"] as? String), outcome: outcome, nextStep: nextStep)
-            let confidence = clampConfidence(raw["confidence"])
-            let evidenceRefs = uniqueStrings(raw["evidence_refs"] as? [String] ?? [])
-            var segmentEntities = uniqueStrings(raw["entities"] as? [String] ?? [])
-            let project = normalizeTask((raw["project"] as? String)?.nilIfEmpty) ?? normalizeTask(defaultProject)
-            let workspace = normalizeTask((raw["workspace"] as? String)?.nilIfEmpty) ?? normalizeTask(defaultWorkspace)
-            let repo = normalizeTask((raw["repo"] as? String)?.nilIfEmpty)
-            let document = normalizeTask((raw["document"] as? String)?.nilIfEmpty)
-            let url = normalizeTask((raw["url"] as? String)?.nilIfEmpty)
-            let appName = normalizeTask((raw["app_name"] as? String)?.nilIfEmpty) ?? normalizeTask(defaultAppName)
-            let bundleID = normalizeTask((raw["bundle_id"] as? String)?.nilIfEmpty) ?? normalizeTask(defaultBundleID)
-
-            for marker in [task, issueOrGoal, project, workspace, repo, document] {
-                if let marker, !segmentEntities.contains(marker) {
-                    segmentEntities.append(marker)
-                }
-            }
-
-            segments.append(
-                TaskSegmentDraft(
-                    task: task,
-                    issueOrGoal: issueOrGoal,
-                    actions: actions,
-                    outcome: outcome,
-                    nextStep: nextStep,
-                    status: status,
-                    confidence: confidence,
-                    evidenceRefs: evidenceRefs,
-                    entities: segmentEntities,
-                    project: project,
-                    workspace: workspace,
-                    repo: repo,
-                    document: document,
-                    url: url,
-                    appName: appName,
-                    bundleID: bundleID
-                )
-            )
-        }
-    }
-
-    if segments.isEmpty, !insufficient,
-       let fallback = fallbackTaskSegment(
-           summary: summary,
-           defaultTask: defaultTask,
-           defaultProject: defaultProject,
-           defaultWorkspace: defaultWorkspace,
-           defaultAppName: defaultAppName,
-           defaultBundleID: defaultBundleID
-       ) {
-        segments = [fallback]
-    }
-
-    for segment in segments {
-        if !entities.contains(segment.task) {
-            entities.append(segment.task)
-        }
-        if let project = segment.project, !entities.contains(project) {
-            entities.append(project)
-        }
-        if let workspace = segment.workspace, !entities.contains(workspace) {
-            entities.append(workspace)
-        }
-    }
-
-    return StructuredSynthesis(
-        summary: summary,
-        entities: entities,
-        insufficientEvidence: insufficient,
-        taskSegments: segments
-    )
-}
-
-private let highConfidenceInferenceThreshold = 0.72
-
-private func objectString(_ object: [String: Any], keys: [String]) -> String? {
-    for key in keys {
-        if let text = (object[key] as? String)?.nilIfEmpty {
-            return text
-        }
-    }
-    return nil
-}
-
-private func boolValue(_ raw: Any?) -> Bool? {
-    if let value = raw as? Bool {
-        return value
-    }
-    if let value = raw as? NSNumber {
-        return value.boolValue
-    }
-    if let value = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        switch value {
-        case "true", "1", "yes":
-            return true
-        case "false", "0", "no":
-            return false
-        default:
-            return nil
-        }
-    }
-    return nil
-}
-
-private func normalizeArtifactField(_ text: String?) -> String? {
-    guard var value = text?.nilIfEmpty else { return nil }
-    value = value
-        .replacingOccurrences(of: "\n", with: " ")
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-    while value.contains("  ") {
-        value = value.replacingOccurrences(of: "  ", with: " ")
-    }
-    if value == "{" || value == "}" {
-        return nil
-    }
-    return value.nilIfEmpty
-}
-
-private func parseArtifactInferenceStatus(_ raw: Any?) -> ArtifactInferenceStatus {
-    guard let value = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
-        return .none
-    }
-
-    switch value {
-    case "blocked", "stalled":
-        return .blocked
-    case "in_progress", "in progress", "active", "working", "ongoing":
-        return .inProgress
-    case "resolved", "done", "complete", "completed", "success":
-        return .resolved
-    default:
-        return .none
-    }
-}
-
-private func composeArtifactSummary(
-    description: String,
-    problem: String?,
-    success: String?,
-    userContribution: String?,
-    suggestionOrDecision: String?,
-    status: ArtifactInferenceStatus,
-    insufficient: Bool
-) -> String {
-    if insufficient {
-        return "insufficient evidence"
-    }
-
-    var parts: [String] = [ensureSentence(sanitizeSummaryPhrasing(description))]
-
-    if let problem {
-        parts.append("Problem: \(ensureSentence(problem))")
-    }
-    if let success {
-        parts.append("Success: \(ensureSentence(success))")
-    }
-    if let userContribution {
-        parts.append("User contribution: \(ensureSentence(userContribution))")
-    }
-    if let suggestionOrDecision {
-        parts.append("Suggestion/decision: \(ensureSentence(suggestionOrDecision))")
-    }
-    if status != .none {
-        parts.append("Status: \(artifactStatusLabel(status)).")
-    }
-
-    return parts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-}
-
-private func artifactStatusLabel(_ status: ArtifactInferenceStatus) -> String {
-    switch status {
-    case .none:
-        return "none"
-    case .blocked:
-        return "blocked"
-    case .inProgress:
-        return "in progress"
-    case .resolved:
-        return "resolved"
-    }
-}
-
-private func ensureSentence(_ text: String) -> String {
-    let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let last = value.last else { return value }
-    if [".", "!", "?"].contains(last) {
-        return value
-    }
-    return "\(value)."
-}
-
-private func parseArtifactJSON(_ text: String) -> [String: Any]? {
-    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-    let candidates: [String] = [
-        trimmed,
-        stripMarkdownCodeFence(trimmed),
-        firstJSONObjectString(in: trimmed) ?? "",
-        firstJSONObjectString(in: stripMarkdownCodeFence(trimmed)) ?? ""
-    ]
-
-    for candidate in candidates where !candidate.isEmpty {
-        guard let data = candidate.data(using: .utf8) else { continue }
-        if let raw = try? JSONSerialization.jsonObject(with: data, options: []),
-           let object = raw as? [String: Any] {
-            return object
-        }
-    }
-
-    return nil
-}
-
-private func stripMarkdownCodeFence(_ text: String) -> String {
-    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard trimmed.hasPrefix("```") else {
-        return trimmed
-    }
-
-    var lines = trimmed.components(separatedBy: .newlines)
-    if !lines.isEmpty {
-        lines.removeFirst()
-    }
-
-    while let last = lines.last, last.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("```") {
-        lines.removeLast()
-    }
-
-    return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-}
-
-private func firstJSONObjectString(in text: String) -> String? {
-    var startIndex: String.Index?
-    var depth = 0
-    var inString = false
-    var escaping = false
-
-    for index in text.indices {
-        let character = text[index]
-
-        if escaping {
-            escaping = false
-            continue
-        }
-
-        if inString {
-            if character == "\\" {
-                escaping = true
-            } else if character == "\"" {
-                inString = false
-            }
-            continue
-        }
-
-        if character == "\"" {
-            inString = true
-            continue
-        }
-
-        if character == "{" {
-            if startIndex == nil {
-                startIndex = index
-            }
-            depth += 1
-            continue
-        }
-
-        if character == "}" && depth > 0 {
-            depth -= 1
-            if depth == 0, let startIndex {
-                let end = text.index(after: index)
-                return String(text[startIndex..<end])
-            }
-        }
-    }
-
-    return nil
-}
-
-private func fallbackSummary(
-    project: String?,
-    workspace: String?,
-    task: String?,
-    evidence: [String]
-) -> String? {
-    var fragments: [String] = []
-    if let task {
-        fragments.append(task)
-    }
-    if let project {
-        fragments.append("project \(project)")
-    }
-    if let workspace {
-        fragments.append("workspace \(workspace)")
-    }
-    if !evidence.isEmpty {
-        fragments.append(evidence.prefix(2).joined(separator: "; "))
-    }
-    return fragments.joined(separator: " • ").nilIfEmpty
-}
-
-private func fallbackTaskSegment(
-    summary: String,
-    defaultTask: String?,
-    defaultProject: String?,
-    defaultWorkspace: String?,
-    defaultAppName: String?,
-    defaultBundleID: String?
-) -> TaskSegmentDraft? {
-    let task = normalizeTask(defaultTask)
-        ?? inferTask(summary: summary, evidence: [], fallbackHint: nil)
-        ?? normalizeTask(extractQuotedPhrase(from: summary))
-    guard let task else { return nil }
-
-    let status: TaskSegmentStatus = summary.lowercased().contains("insufficient evidence") ? .unknown : .inProgress
-    return TaskSegmentDraft(
-        task: task,
-        issueOrGoal: nil,
-        actions: [],
-        outcome: nil,
-        nextStep: nil,
-        status: status,
-        confidence: 0.45,
-        evidenceRefs: [],
-        entities: [task],
-        project: normalizeTask(defaultProject),
-        workspace: normalizeTask(defaultWorkspace),
-        repo: nil,
-        document: nil,
-        url: nil,
-        appName: normalizeTask(defaultAppName),
-        bundleID: normalizeTask(defaultBundleID)
-    )
-}
-
-private func parseTaskSegmentStatus(_ raw: String?, outcome: String?, nextStep: String?) -> TaskSegmentStatus {
-    let normalized = raw?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-
-    switch normalized {
-    case "done", "completed", "complete", "resolved":
-        return .done
-    case "in_progress", "in progress", "active", "working":
-        return .inProgress
-    case "pending", "todo", "to_do":
-        return .pending
-    case "blocked", "stalled":
-        return .blocked
-    default:
-        break
-    }
-
-    if outcome?.nilIfEmpty != nil {
-        return .done
-    }
-    if nextStep?.nilIfEmpty != nil {
-        return .pending
-    }
-    return .inProgress
-}
-
-private func clampConfidence(_ raw: Any?) -> Double {
-    if let value = raw as? Double {
-        return max(0, min(1, value))
-    }
-    if let value = raw as? NSNumber {
-        return max(0, min(1, value.doubleValue))
-    }
-    if let text = raw as? String, let value = Double(text) {
-        return max(0, min(1, value))
-    }
-    return 0.55
-}
-
-private func normalizeTask(_ task: String?) -> String? {
-    guard var value = task?.nilIfEmpty else { return nil }
-    value = value
-        .replacingOccurrences(of: "\n", with: " ")
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        .trimmingCharacters(in: CharacterSet(charactersIn: ".,;:"))
-
-    if value.count < 4 {
-        return nil
-    }
-
-    let lowercased = value.lowercased()
-    let generic = [
-        "working in app",
-        "using app",
-        "general browsing",
-        "unknown",
-        "n/a"
-    ]
-    if generic.contains(where: { lowercased == $0 }) {
-        return nil
-    }
-
-    return value
-}
-
-private func inferTask(summary: String, evidence: [String], fallbackHint: String?) -> String? {
-    let candidates: [String?] = [
-        extractQuotedPhrase(from: summary),
-        extractWorkingOnPhrase(from: summary),
-        fallbackHint,
-        evidence.first
-    ]
-
-    for candidate in candidates {
-        if let normalized = normalizeTask(candidate) {
-            return normalized
-        }
-    }
-    return nil
-}
-
-private func sanitizeSummaryPhrasing(_ summary: String) -> String {
-    var output = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-    let replacements: [(String, String)] = [
-        ("The user is ", ""),
-        ("The user ", ""),
-        ("User is ", "")
-    ]
-
-    for (prefix, replacement) in replacements {
-        if output.hasPrefix(prefix) {
-            output = replacement + output.dropFirst(prefix.count)
-            break
-        }
-    }
-
-    if let first = output.first {
-        output = String(first).uppercased() + output.dropFirst()
-    }
-    return output
-}
-
-private func inferProject(from summary: String, entities: [String]) -> String? {
-    for entity in entities {
-        let lowercased = entity.lowercased()
-        if lowercased.contains("project") || lowercased.contains("workspace") {
-            return entity
-        }
-    }
-
-    let lower = summary.lowercased()
-    if let range = lower.range(of: "project ") {
-        let tail = String(lower[range.upperBound...])
-        let value = tail.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: true).first
-        return normalizeTask(value.map(String.init))
-    }
-    return nil
-}
-
-private func inferWorkspace(from summary: String, entities: [String]) -> String? {
-    for entity in entities {
-        let lowercased = entity.lowercased()
-        if lowercased.contains("workspace") || lowercased.contains("thread") {
-            return entity
-        }
-    }
-
-    let lower = summary.lowercased()
-    if let range = lower.range(of: "workspace ") {
-        let tail = String(lower[range.upperBound...])
-        let value = tail.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: true).first
-        return normalizeTask(value.map(String.init))
-    }
-    return nil
-}
-
-private func extractQuotedPhrase(from text: String) -> String? {
-    let components = text.components(separatedBy: "'")
-    if components.count >= 3 {
-        return components[1].nilIfEmpty
-    }
-    return nil
-}
-
-private func extractWorkingOnPhrase(from text: String) -> String? {
-    let lower = text.lowercased()
-    guard let range = lower.range(of: "working on ") else { return nil }
-    let rawTail = String(text[range.upperBound...])
-    let delimiterSet = CharacterSet(charactersIn: ".,;\n")
-    if let delimiterRange = rawTail.rangeOfCharacter(from: delimiterSet) {
-        return String(rawTail[..<delimiterRange.lowerBound]).nilIfEmpty
-    }
-    return rawTail.nilIfEmpty
-}
-
-private func summaryContainsTask(_ summary: String, task: String) -> Bool {
-    let summaryLower = summary.lowercased()
-    let taskLower = task.lowercased()
-    return summaryLower.contains(taskLower)
-}
-
-private func cleanedFreeformText(_ text: String) -> String? {
-    let cleaned = stripMarkdownCodeFence(text)
-        .replacingOccurrences(of: "\n", with: " ")
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let value = cleaned.nilIfEmpty else {
-        return nil
-    }
-    if value == "{" || value == "}" {
-        return "insufficient evidence"
-    }
-    return value
-}
-
-private func uniqueStrings(_ values: [String]) -> [String] {
-    var seen = Set<String>()
-    var output: [String] = []
-    for value in values {
-        guard let normalized = value.nilIfEmpty else { continue }
-        if seen.insert(normalized).inserted {
-            output.append(normalized)
-        }
-    }
-    return output
 }

@@ -266,7 +266,9 @@ final class HourlyActivityReporter: @unchecked Sendable {
                         defaultAppName: appDuration.appName,
                         defaultBundleID: appDuration.bundleID,
                         drafts: parsed.taskSegments,
-                        sourceSummaryID: summaryID
+                        sourceSummaryID: summaryID,
+                        sourceEvidence: evidence,
+                        defaultSourceKinds: [.intervalSummary]
                     )
                     usage = result.usage
                 } catch {
@@ -444,7 +446,9 @@ final class HourlyActivityReporter: @unchecked Sendable {
                     defaultAppName: nil,
                     defaultBundleID: nil,
                     drafts: parsed.taskSegments,
-                    sourceSummaryID: hourSummaryID
+                    sourceSummaryID: hourSummaryID,
+                    sourceEvidence: [],
+                    defaultSourceKinds: [.hourSummary]
                 )
                 usage = result.usage
             } catch {
@@ -528,9 +532,13 @@ final class HourlyActivityReporter: @unchecked Sendable {
         defaultAppName: String?,
         defaultBundleID: String?,
         drafts: [TaskSegmentDraft],
-        sourceSummaryID: String
+        sourceSummaryID: String,
+        sourceEvidence: [StoredEvidenceRecord],
+        defaultSourceKinds: [PromotedSourceKind]
     ) -> [TaskSegmentRecord] {
         guard !drafts.isEmpty else { return [] }
+
+        let evidenceByID = Dictionary(uniqueKeysWithValues: sourceEvidence.map { ($0.metadata.id, $0) })
 
         return drafts.enumerated().map { index, draft in
             let normalizedTask = draft.task.nilIfEmpty ?? "unknown task"
@@ -538,10 +546,23 @@ final class HourlyActivityReporter: @unchecked Sendable {
             let bundleID = draft.bundleID?.nilIfEmpty ?? defaultBundleID
             let project = draft.project?.nilIfEmpty
             let workspace = draft.workspace?.nilIfEmpty
+            let evidenceRefs = uniqueList(draft.evidenceRefs)
+            let promotedExcerpts = promotedEvidenceExcerpts(
+                for: evidenceRefs,
+                sourceEvidence: evidenceByID
+            )
+            let evidenceExcerpts = uniqueList(draft.evidenceExcerpts + promotedExcerpts)
+            let inferredArtifactKinds = evidenceRefs.compactMap { evidenceByID[$0]?.metadata.kind }
+            let artifactKinds = uniqueArtifactKinds(draft.artifactKinds + inferredArtifactKinds)
+            let inferredSourceKinds = evidenceRefs.isEmpty && evidenceExcerpts.isEmpty ? [] : [PromotedSourceKind.artifactPerception]
+            let sourceKinds = uniquePromotedSourceKinds(draft.sourceKinds + defaultSourceKinds + inferredSourceKinds)
+            let people = uniqueList(draft.people)
+            let blocker = draft.blocker?.nilIfEmpty
             let entities = uniqueList(
                 draft.entities
                 + draft.actions
-                + [normalizedTask, project, workspace, draft.repo, draft.document].compactMap { $0 }
+                + people
+                + [normalizedTask, project, workspace, draft.repo, draft.document, blocker].compactMap { $0 }
             )
             let summary = draftSummary(from: draft)
             let id = stableTaskSegmentID(
@@ -572,10 +593,15 @@ final class HourlyActivityReporter: @unchecked Sendable {
                 actions: uniqueList(draft.actions),
                 outcome: draft.outcome?.nilIfEmpty,
                 nextStep: draft.nextStep?.nilIfEmpty,
+                people: people,
+                blocker: blocker,
                 status: draft.status,
                 confidence: max(0, min(1, draft.confidence)),
-                evidenceRefs: uniqueList(draft.evidenceRefs),
+                evidenceRefs: evidenceRefs,
+                evidenceExcerpts: evidenceExcerpts,
                 entities: entities,
+                artifactKinds: artifactKinds,
+                sourceKinds: sourceKinds,
                 summary: summary,
                 sourceSummaryID: sourceSummaryID,
                 promptVersion: synthesisPromptVersion
@@ -602,11 +628,20 @@ final class HourlyActivityReporter: @unchecked Sendable {
         if let next = segment.nextStep?.nilIfEmpty {
             metadata["next_step"] = next
         }
+        if let blocker = segment.blocker?.nilIfEmpty {
+            metadata["blocker"] = blocker
+        }
         if !segment.actions.isEmpty {
             metadata["actions"] = segment.actions.joined(separator: " | ")
         }
+        if !segment.people.isEmpty {
+            metadata["people"] = segment.people.joined(separator: " | ")
+        }
         if !segment.evidenceRefs.isEmpty {
             metadata["evidence_refs"] = segment.evidenceRefs.joined(separator: " | ")
+        }
+        if !segment.evidenceExcerpts.isEmpty {
+            metadata["evidence_excerpts"] = segment.evidenceExcerpts.prefix(3).joined(separator: " | ")
         }
         if let workspace = segment.workspace?.nilIfEmpty {
             metadata["workspace"] = workspace
@@ -619,6 +654,12 @@ final class HourlyActivityReporter: @unchecked Sendable {
         }
         if let url = segment.url?.nilIfEmpty {
             metadata["url"] = url
+        }
+        if !segment.artifactKinds.isEmpty {
+            metadata["artifact_kinds"] = segment.artifactKinds.map(\.rawValue).joined(separator: " | ")
+        }
+        if !segment.sourceKinds.isEmpty {
+            metadata["source_kinds"] = segment.sourceKinds.map(\.rawValue).joined(separator: " | ")
         }
 
         return MemoryPayload(
@@ -649,8 +690,20 @@ final class HourlyActivityReporter: @unchecked Sendable {
         if let next = segment.nextStep?.nilIfEmpty {
             fragments.append("Next step: \(next)")
         }
+        if let blocker = segment.blocker?.nilIfEmpty {
+            fragments.append("Blocker: \(blocker)")
+        }
+        if !segment.people.isEmpty {
+            fragments.append("People: \(segment.people.joined(separator: ", "))")
+        }
         if let project = segment.project?.nilIfEmpty {
             fragments.append("Project: \(project)")
+        }
+        if let workspace = segment.workspace?.nilIfEmpty {
+            fragments.append("Workspace: \(workspace)")
+        }
+        if !segment.evidenceExcerpts.isEmpty {
+            fragments.append("Evidence: \(segment.evidenceExcerpts.prefix(2).joined(separator: " ; "))")
         }
         return fragments.joined(separator: " | ")
     }
@@ -667,7 +720,81 @@ final class HourlyActivityReporter: @unchecked Sendable {
         if let next = draft.nextStep?.nilIfEmpty {
             lines.append("Next: \(next)")
         }
+        if let blocker = draft.blocker?.nilIfEmpty {
+            lines.append("Blocker: \(blocker)")
+        }
+        if !draft.people.isEmpty {
+            lines.append("People: \(draft.people.joined(separator: ", "))")
+        }
         return lines.joined(separator: " • ")
+    }
+
+    private func promotedEvidenceExcerpts(
+        for evidenceRefs: [String],
+        sourceEvidence: [String: StoredEvidenceRecord]
+    ) -> [String] {
+        evidenceRefs.compactMap { id in
+            guard let record = sourceEvidence[id] else { return nil }
+            return excerpt(from: record)
+        }
+    }
+
+    private func excerpt(from record: StoredEvidenceRecord) -> String? {
+        guard let analysis = record.analysis else { return nil }
+
+        if record.metadata.kind == .audio, let transcript = analysis.transcript?.nilIfEmpty {
+            return compact(transcript, limit: 220)
+        }
+
+        var fragments: [String] = []
+        if let content = analysis.contentDescription.nilIfEmpty {
+            fragments.append(content)
+        } else if let description = analysis.description.nilIfEmpty {
+            fragments.append(description)
+        }
+        if !analysis.salientText.isEmpty {
+            fragments.append("Visible: \(analysis.salientText.prefix(4).joined(separator: "; "))")
+        }
+        if let layout = analysis.layoutDescription.nilIfEmpty, layout != analysis.contentDescription.nilIfEmpty {
+            fragments.append("Layout: \(layout)")
+        }
+        return compact(fragments.joined(separator: " | "), limit: 220)
+    }
+
+    private func compact(_ text: String, limit: Int) -> String? {
+        guard let normalized = text
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty else {
+            return nil
+        }
+        guard normalized.count > limit else {
+            return normalized
+        }
+        let index = normalized.index(normalized.startIndex, offsetBy: limit)
+        return "\(normalized[..<index]).trimmingCharacters(in: .whitespacesAndNewlines)…"
+    }
+
+    private func uniqueArtifactKinds(_ values: [ArtifactKind]) -> [ArtifactKind] {
+        var seen = Set<ArtifactKind>()
+        var output: [ArtifactKind] = []
+        for value in values {
+            if seen.insert(value).inserted {
+                output.append(value)
+            }
+        }
+        return output
+    }
+
+    private func uniquePromotedSourceKinds(_ values: [PromotedSourceKind]) -> [PromotedSourceKind] {
+        var seen = Set<PromotedSourceKind>()
+        var output: [PromotedSourceKind] = []
+        for value in values {
+            if seen.insert(value).inserted {
+                output.append(value)
+            }
+        }
+        return output
     }
 
     private func stableTaskSegmentID(

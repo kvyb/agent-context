@@ -94,9 +94,120 @@ final class SQLiteBM25MemoryRetrieverTests: XCTestCase {
             limit: 6
         )
 
-        XCTAssertTrue(hits.contains { $0.id == "evidence|audio-1" })
-        XCTAssertTrue(hits.contains { $0.id == "evidence|audio-2" })
-        XCTAssertEqual(hits.first?.metadata["artifact_kind"], ArtifactKind.audio.rawValue)
+        XCTAssertTrue(hits.contains { $0.id.hasPrefix("transcript-unit|audio-1-transcript-") })
+        XCTAssertTrue(hits.contains { $0.id.hasPrefix("transcript-unit|audio-2-transcript-") })
+        XCTAssertEqual(hits.first?.metadata["retrieval_unit"], "transcript_unit")
+    }
+
+    func testWorkSummaryQueriesPreferTaskSegmentsOverLooseMemorySummaries() async throws {
+        let database = try SQLiteStore(databaseURL: temporaryDatabaseURL())
+        let parser = MemoryQueryScopeParser(calendar: utcCalendar)
+        let retriever = SQLiteBM25MemoryRetriever(
+            database: database,
+            ranker: BM25Ranker(),
+            scopeParser: parser
+        )
+
+        let dayStart = date(year: 2026, month: 3, day: 16, hour: 9)
+        let dayEnd = date(year: 2026, month: 3, day: 16, hour: 18)
+        try await database.saveTaskSegments([
+            TaskSegmentRecord(
+                id: "manychat-task",
+                scope: "day",
+                startTime: dayStart,
+                endTime: dayEnd,
+                occurredAt: dayStart,
+                appName: "GitHub",
+                bundleID: "com.github",
+                project: "ManyChat",
+                workspace: "/tmp/manychat",
+                repo: "manychat/backend",
+                document: nil,
+                url: nil,
+                task: "Reviewed sampler PR and debugged ManyChat rate-limit workflow",
+                issueOrGoal: "Stabilize sampler rollout",
+                actions: ["Reviewed PR 568", "Investigated rate-limit retries"],
+                outcome: "Identified rollback risk and follow-up actions",
+                nextStep: "Coordinate rollout changes with AI Research",
+                status: .inProgress,
+                confidence: 0.98,
+                evidenceRefs: [],
+                entities: ["ManyChat", "PR 568", "sampler"],
+                summary: "Task: Reviewed sampler PR and debugged ManyChat rate-limit workflow",
+                sourceSummaryID: nil,
+                promptVersion: "test"
+            )
+        ])
+
+        try await database.saveMemoryPayload(
+            MemoryPayload(
+                id: "mem0-open-tulpa",
+                scope: "task_segment",
+                occurredAt: dayStart,
+                appName: "Codex",
+                project: "OpenTulpa",
+                summary: "Worked on OpenTulpa terminal timeout debugging and tunnel startup.",
+                entities: ["OpenTulpa", "timeout"],
+                metadata: [:]
+            ),
+            status: "ok",
+            responseJSON: nil
+        )
+
+        let hits = await retriever.retrieve(
+            queries: ["What did user do for ManyChat on 2026-03-16? What are the projects, tasks, and struggles?"],
+            scope: MemoryQueryScope(start: dayStart, end: dayEnd, label: "2026-03-16"),
+            limit: 5
+        )
+
+        XCTAssertEqual(hits.first?.project, "ManyChat")
+        XCTAssertEqual(hits.first?.metadata["retrieval_unit"], "task_segment")
+    }
+
+    func testTranscriptLikeQueriesPreferSpeakerExchangeWindows() async throws {
+        let database = try SQLiteStore(databaseURL: temporaryDatabaseURL())
+        let parser = MemoryQueryScopeParser(calendar: utcCalendar)
+        let retriever = SQLiteBM25MemoryRetriever(
+            database: database,
+            ranker: BM25Ranker(),
+            scopeParser: parser
+        )
+
+        let capturedAt = date(year: 2026, month: 3, day: 16, hour: 21, minute: 15)
+        try await insertEvidence(
+            database: database,
+            id: "audio-exchange",
+            appName: "zoom.us",
+            capturedAt: capturedAt,
+            kind: .audio,
+            title: "Technical Interview",
+            analysis: ArtifactAnalysis(
+                description: "Candidate explained how retrieval quality was measured.",
+                summary: "Topics: retrieval metrics and evaluation.",
+                transcript: "S2: How did you evaluate retrieval quality in production? S1: We started with NDCG and then validated the end-to-end answer quality with LLM-as-a-judge checks.",
+                entities: ["NDCG", "evaluation", "candidate"],
+                insufficientEvidence: false,
+                project: "AI Core Team",
+                workspace: "zoom.us",
+                task: "Candidate interview",
+                evidence: []
+            )
+        )
+
+        let hits = await retriever.retrieve(
+            queries: ["What did the candidate say about evaluation metrics in the interview transcript?"],
+            scope: MemoryQueryScope(
+                start: date(year: 2026, month: 3, day: 16, hour: 18),
+                end: date(year: 2026, month: 3, day: 17, hour: 6),
+                label: "on 2026-03-16"
+            ),
+            limit: 3
+        )
+
+        XCTAssertEqual(hits.first?.metadata["retrieval_unit"], "transcript_unit")
+        XCTAssertEqual(hits.first?.metadata["speaker_exchange"], "true")
+        XCTAssertTrue(hits.first?.text.contains("S2: How did you evaluate retrieval quality") == true)
+        XCTAssertTrue(hits.first?.text.contains("S1: We started with NDCG") == true)
     }
 
     private var utcCalendar: Calendar {

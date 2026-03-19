@@ -1,34 +1,6 @@
 import Foundation
 import SQLite3
 
-struct TimelineSlice: Sendable {
-    let startTime: Date
-    let endTime: Date
-    let appName: String
-    let bundleID: String?
-    let project: String?
-}
-
-struct StoredEvidenceRecord: Sendable {
-    let metadata: ArtifactMetadata
-    let analysis: ArtifactAnalysis?
-}
-
-struct MemoryRecord: Sendable {
-    let occurredAt: Date
-    let scope: String
-    let appName: String?
-    let project: String?
-    let summary: String
-    let entities: [String]
-}
-
-struct PurgedArtifactBatch: Sendable {
-    let kind: ArtifactKind
-    let deletedRows: Int
-    let deletedPaths: [String]
-}
-
 actor SQLiteStore {
     private let databaseURL: URL
     private var db: OpaquePointer?
@@ -104,6 +76,50 @@ actor SQLiteStore {
             );
             """,
             "CREATE INDEX IF NOT EXISTS idx_evidence_captured_at ON evidence(captured_at);",
+            """
+            CREATE TABLE IF NOT EXISTS artifact_perceptions (
+                evidence_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                artifact_path TEXT NOT NULL,
+                captured_at REAL NOT NULL,
+                app_name TEXT NOT NULL,
+                bundle_id TEXT,
+                pid INTEGER NOT NULL,
+                window_title TEXT,
+                document_path TEXT,
+                window_url TEXT,
+                workspace TEXT,
+                project TEXT,
+                interval_id TEXT,
+                capture_reason TEXT,
+                sequence_in_interval INTEGER,
+                analysis_json TEXT NOT NULL,
+                llm_model TEXT,
+                llm_input_tokens INTEGER DEFAULT 0,
+                llm_output_tokens INTEGER DEFAULT 0,
+                llm_audio_tokens INTEGER DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_artifact_perceptions_captured_at ON artifact_perceptions(captured_at);",
+            "CREATE INDEX IF NOT EXISTS idx_artifact_perceptions_app_project ON artifact_perceptions(app_name, project);",
+            """
+            INSERT OR IGNORE INTO artifact_perceptions(
+                evidence_id, kind, artifact_path, captured_at, app_name, bundle_id, pid,
+                window_title, document_path, window_url, workspace, project,
+                interval_id, capture_reason, sequence_in_interval, analysis_json,
+                llm_model, llm_input_tokens, llm_output_tokens, llm_audio_tokens,
+                created_at, updated_at
+            )
+            SELECT id, kind, artifact_path, captured_at, app_name, bundle_id, pid,
+                   window_title, document_path, window_url, workspace, project,
+                   interval_id, capture_reason, sequence_in_interval, analysis_json,
+                   llm_model, llm_input_tokens, llm_output_tokens, llm_audio_tokens,
+                   captured_at, captured_at
+              FROM evidence
+             WHERE analysis_json IS NOT NULL;
+            """,
             """
             CREATE TABLE IF NOT EXISTS interval_summaries (
                 id TEXT PRIMARY KEY,
@@ -185,10 +201,15 @@ actor SQLiteStore {
                 actions_json TEXT NOT NULL,
                 outcome TEXT,
                 next_step TEXT,
+                people_json TEXT NOT NULL DEFAULT '[]',
+                blocker TEXT,
                 status TEXT NOT NULL,
                 confidence REAL NOT NULL,
                 evidence_refs_json TEXT NOT NULL,
+                evidence_excerpts_json TEXT NOT NULL DEFAULT '[]',
                 entities_json TEXT NOT NULL,
+                artifact_kinds_json TEXT NOT NULL DEFAULT '[]',
+                source_kinds_json TEXT NOT NULL DEFAULT '[]',
                 summary TEXT NOT NULL,
                 source_summary_id TEXT,
                 prompt_version TEXT NOT NULL,
@@ -199,6 +220,38 @@ actor SQLiteStore {
             "CREATE INDEX IF NOT EXISTS idx_task_segments_time ON task_segments(occurred_at);",
             "CREATE INDEX IF NOT EXISTS idx_task_segments_status ON task_segments(status);",
             "CREATE INDEX IF NOT EXISTS idx_task_segments_app_project ON task_segments(app_name, project);",
+            """
+            CREATE TABLE IF NOT EXISTS transcript_units (
+                id TEXT PRIMARY KEY,
+                evidence_id TEXT NOT NULL,
+                occurred_at REAL NOT NULL,
+                app_name TEXT,
+                bundle_id TEXT,
+                project TEXT,
+                workspace TEXT,
+                task TEXT,
+                session_id TEXT,
+                unit_kind TEXT NOT NULL,
+                speaker_label TEXT,
+                summary TEXT NOT NULL,
+                excerpt_text TEXT NOT NULL,
+                topic_tags_json TEXT NOT NULL,
+                people_json TEXT NOT NULL,
+                entities_json TEXT NOT NULL,
+                source_evidence_refs_json TEXT NOT NULL,
+                source_excerpts_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_transcript_units_time ON transcript_units(occurred_at);",
+            "CREATE INDEX IF NOT EXISTS idx_transcript_units_session ON transcript_units(session_id);",
+            "CREATE INDEX IF NOT EXISTS idx_transcript_units_project ON transcript_units(project);",
+            "ALTER TABLE task_segments ADD COLUMN people_json TEXT NOT NULL DEFAULT '[]';",
+            "ALTER TABLE task_segments ADD COLUMN blocker TEXT;",
+            "ALTER TABLE task_segments ADD COLUMN evidence_excerpts_json TEXT NOT NULL DEFAULT '[]';",
+            "ALTER TABLE task_segments ADD COLUMN artifact_kinds_json TEXT NOT NULL DEFAULT '[]';",
+            "ALTER TABLE task_segments ADD COLUMN source_kinds_json TEXT NOT NULL DEFAULT '[]';",
             """
             CREATE TABLE IF NOT EXISTS finalized_interval_buckets (
                 bucket_start REAL PRIMARY KEY,
@@ -239,9 +292,12 @@ actor SQLiteStore {
         for sql in statements {
             var errorPointer: UnsafeMutablePointer<Int8>?
             let code = sqlite3_exec(db, sql, nil, nil, &errorPointer)
-            guard code == SQLITE_OK else {
+            if code != SQLITE_OK {
                 let message = errorPointer.map { String(cString: $0) } ?? "SQLite migration error"
                 sqlite3_free(errorPointer)
+                if sql.contains("ALTER TABLE"), message.lowercased().contains("duplicate column name") {
+                    continue
+                }
                 throw NSError(domain: "SQLiteStore", code: Int(code), userInfo: [NSLocalizedDescriptionKey: message])
             }
         }
@@ -337,6 +393,43 @@ actor SQLiteStore {
         sqlite3_bind_int(statement, 5, Int32(usage?.audioTokens ?? 0))
         bindText(statement, index: 6, value: evidenceID)
         try step(statement)
+
+        let perceptionSQL = """
+            INSERT OR REPLACE INTO artifact_perceptions(
+                evidence_id, kind, artifact_path, captured_at, app_name, bundle_id, pid,
+                window_title, document_path, window_url, workspace, project,
+                interval_id, capture_reason, sequence_in_interval, analysis_json,
+                llm_model, llm_input_tokens, llm_output_tokens, llm_audio_tokens,
+                created_at, updated_at
+            )
+            SELECT id, kind, artifact_path, captured_at, app_name, bundle_id, pid,
+                   window_title, document_path, window_url, workspace, project,
+                   interval_id, capture_reason, sequence_in_interval, ?, ?, ?, ?, ?,
+                   COALESCE(
+                       (SELECT created_at FROM artifact_perceptions WHERE evidence_id = evidence.id),
+                       strftime('%s','now')
+                   ),
+                   strftime('%s','now')
+              FROM evidence
+             WHERE id = ?;
+        """
+
+        var perceptionStatement: OpaquePointer?
+        try prepare(perceptionSQL, statement: &perceptionStatement)
+        defer { sqlite3_finalize(perceptionStatement) }
+
+        bindText(perceptionStatement, index: 1, value: analysisJSON)
+        bindOptionalText(perceptionStatement, index: 2, value: model)
+        sqlite3_bind_int(perceptionStatement, 3, Int32(usage?.inputTokens ?? 0))
+        sqlite3_bind_int(perceptionStatement, 4, Int32(usage?.outputTokens ?? 0))
+        sqlite3_bind_int(perceptionStatement, 5, Int32(usage?.audioTokens ?? 0))
+        bindText(perceptionStatement, index: 6, value: evidenceID)
+        try step(perceptionStatement)
+
+        if let metadata = try fetchArtifactMetadata(id: evidenceID) {
+            let transcriptUnits = TranscriptUnitPromoter().promote(metadata: metadata, analysis: analysis)
+            try saveTranscriptUnits(transcriptUnits)
+        }
 
         if let usage {
             try appendUsageEvent(usage)
@@ -442,6 +535,8 @@ actor SQLiteStore {
                     kind: kind,
                     appName: appName,
                     description: analysis?.description ?? (analysis?.summary ?? "Pending analysis"),
+                    contentDescription: analysis?.contentDescription ?? (analysis?.description ?? analysis?.summary ?? "Pending analysis"),
+                    layoutDescription: analysis?.layoutDescription ?? (analysis?.contentDescription ?? analysis?.description ?? analysis?.summary ?? "Pending analysis"),
                     problem: analysis?.problem,
                     success: analysis?.success,
                     userContribution: analysis?.userContribution,
@@ -450,6 +545,8 @@ actor SQLiteStore {
                     confidence: analysis?.confidence ?? 0,
                     summary: analysis?.summary ?? "Pending analysis",
                     transcript: analysis?.transcript,
+                    salientText: analysis?.salientText ?? [],
+                    uiElements: analysis?.uiElements ?? [],
                     entities: analysis?.entities ?? [],
                     project: analysis?.project,
                     workspace: analysis?.workspace,
@@ -502,6 +599,8 @@ actor SQLiteStore {
                     kind: kind,
                     appName: appName,
                     description: analysis?.description ?? (analysis?.summary ?? "Pending analysis"),
+                    contentDescription: analysis?.contentDescription ?? (analysis?.description ?? analysis?.summary ?? "Pending analysis"),
+                    layoutDescription: analysis?.layoutDescription ?? (analysis?.contentDescription ?? analysis?.description ?? analysis?.summary ?? "Pending analysis"),
                     problem: analysis?.problem,
                     success: analysis?.success,
                     userContribution: analysis?.userContribution,
@@ -510,6 +609,8 @@ actor SQLiteStore {
                     confidence: analysis?.confidence ?? 0,
                     summary: analysis?.summary ?? "Pending analysis",
                     transcript: analysis?.transcript,
+                    salientText: analysis?.salientText ?? [],
+                    uiElements: analysis?.uiElements ?? [],
                     entities: analysis?.entities ?? [],
                     project: analysis?.project,
                     workspace: analysis?.workspace,
@@ -748,6 +849,44 @@ actor SQLiteStore {
         return output
     }
 
+    func listArtifactPerceptionRecords(start: Date?, end: Date?, limit: Int) throws -> [StoredEvidenceRecord] {
+        var sql = """
+            SELECT evidence_id, kind, artifact_path, captured_at, app_name, bundle_id, pid,
+                   window_title, document_path, window_url, workspace, project,
+                   interval_id, capture_reason, sequence_in_interval, analysis_json
+              FROM artifact_perceptions
+             WHERE analysis_json IS NOT NULL
+        """
+        var bindIndex: Int32 = 1
+        if start != nil {
+            sql += " AND captured_at >= ?"
+        }
+        if end != nil {
+            sql += " AND captured_at < ?"
+        }
+        sql += " ORDER BY captured_at DESC LIMIT ?;"
+
+        var statement: OpaquePointer?
+        try prepare(sql, statement: &statement)
+        defer { sqlite3_finalize(statement) }
+
+        if let start {
+            sqlite3_bind_double(statement, bindIndex, start.timeIntervalSince1970)
+            bindIndex += 1
+        }
+        if let end {
+            sqlite3_bind_double(statement, bindIndex, end.timeIntervalSince1970)
+            bindIndex += 1
+        }
+        sqlite3_bind_int(statement, bindIndex, Int32(max(1, min(limit, 5_000))))
+
+        var output: [StoredEvidenceRecord] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            output.append(decodeStoredEvidenceRecord(from: statement, fallbackAppName: nil))
+        }
+        return output
+    }
+
     func timelineForBucket(start: Date, end: Date) throws -> [TimelineSlice] {
         let sql = """
             SELECT start_time, end_time, app_name, bundle_id, project
@@ -859,10 +998,11 @@ actor SQLiteStore {
             INSERT OR REPLACE INTO task_segments(
                 id, scope, start_time, end_time, occurred_at, app_name, bundle_id,
                 project, workspace, repo, document, url, task, issue_or_goal,
-                actions_json, outcome, next_step, status, confidence, evidence_refs_json,
-                entities_json, summary, source_summary_id, prompt_version, created_at, updated_at
+                actions_json, outcome, next_step, people_json, blocker, status, confidence, evidence_refs_json,
+                evidence_excerpts_json, entities_json, artifact_kinds_json, source_kinds_json,
+                summary, source_summary_id, prompt_version, created_at, updated_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 COALESCE((SELECT created_at FROM task_segments WHERE id = ?), ?), ?
             );
         """
@@ -870,7 +1010,11 @@ actor SQLiteStore {
         for segment in segments {
             let actionsJSON = jsonString(from: segment.actions)
             let evidenceRefsJSON = jsonString(from: segment.evidenceRefs)
+            let evidenceExcerptsJSON = jsonString(from: segment.evidenceExcerpts)
+            let peopleJSON = jsonString(from: segment.people)
             let entitiesJSON = jsonString(from: segment.entities)
+            let artifactKindsJSON = jsonString(from: segment.artifactKinds.map(\.rawValue))
+            let sourceKindsJSON = jsonString(from: segment.sourceKinds.map(\.rawValue))
 
             let now = Date().timeIntervalSince1970
             var statement: OpaquePointer?
@@ -894,16 +1038,74 @@ actor SQLiteStore {
             bindText(statement, index: 15, value: actionsJSON)
             bindOptionalText(statement, index: 16, value: segment.outcome)
             bindOptionalText(statement, index: 17, value: segment.nextStep)
-            bindText(statement, index: 18, value: segment.status.rawValue)
-            sqlite3_bind_double(statement, 19, max(0, min(1, segment.confidence)))
-            bindText(statement, index: 20, value: evidenceRefsJSON)
-            bindText(statement, index: 21, value: entitiesJSON)
-            bindText(statement, index: 22, value: segment.summary)
-            bindOptionalText(statement, index: 23, value: segment.sourceSummaryID)
-            bindText(statement, index: 24, value: segment.promptVersion)
-            bindText(statement, index: 25, value: segment.id)
-            sqlite3_bind_double(statement, 26, now)
-            sqlite3_bind_double(statement, 27, now)
+            bindText(statement, index: 18, value: peopleJSON)
+            bindOptionalText(statement, index: 19, value: segment.blocker)
+            bindText(statement, index: 20, value: segment.status.rawValue)
+            sqlite3_bind_double(statement, 21, max(0, min(1, segment.confidence)))
+            bindText(statement, index: 22, value: evidenceRefsJSON)
+            bindText(statement, index: 23, value: evidenceExcerptsJSON)
+            bindText(statement, index: 24, value: entitiesJSON)
+            bindText(statement, index: 25, value: artifactKindsJSON)
+            bindText(statement, index: 26, value: sourceKindsJSON)
+            bindText(statement, index: 27, value: segment.summary)
+            bindOptionalText(statement, index: 28, value: segment.sourceSummaryID)
+            bindText(statement, index: 29, value: segment.promptVersion)
+            bindText(statement, index: 30, value: segment.id)
+            sqlite3_bind_double(statement, 31, now)
+            sqlite3_bind_double(statement, 32, now)
+
+            try step(statement)
+        }
+    }
+
+    func saveTranscriptUnits(_ units: [TranscriptUnitRecord]) throws {
+        guard !units.isEmpty else { return }
+
+        let sql = """
+            INSERT OR REPLACE INTO transcript_units(
+                id, evidence_id, occurred_at, app_name, bundle_id, project, workspace, task,
+                session_id, unit_kind, speaker_label, summary, excerpt_text, topic_tags_json,
+                people_json, entities_json, source_evidence_refs_json, source_excerpts_json,
+                created_at, updated_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                COALESCE((SELECT created_at FROM transcript_units WHERE id = ?), ?), ?
+            );
+        """
+
+        for unit in units {
+            var statement: OpaquePointer?
+            try prepare(sql, statement: &statement)
+            defer { sqlite3_finalize(statement) }
+
+            let topicTagsJSON = jsonString(from: unit.topicTags)
+            let peopleJSON = jsonString(from: unit.people)
+            let entitiesJSON = jsonString(from: unit.entities)
+            let sourceEvidenceRefsJSON = jsonString(from: unit.sourceEvidenceRefs)
+            let sourceExcerptsJSON = jsonString(from: unit.sourceExcerpts)
+            let now = Date().timeIntervalSince1970
+
+            bindText(statement, index: 1, value: unit.id)
+            bindText(statement, index: 2, value: unit.evidenceID)
+            sqlite3_bind_double(statement, 3, unit.occurredAt.timeIntervalSince1970)
+            bindOptionalText(statement, index: 4, value: unit.appName)
+            bindOptionalText(statement, index: 5, value: unit.bundleID)
+            bindOptionalText(statement, index: 6, value: unit.project)
+            bindOptionalText(statement, index: 7, value: unit.workspace)
+            bindOptionalText(statement, index: 8, value: unit.task)
+            bindOptionalText(statement, index: 9, value: unit.sessionID)
+            bindText(statement, index: 10, value: unit.kind.rawValue)
+            bindOptionalText(statement, index: 11, value: unit.speakerLabel)
+            bindText(statement, index: 12, value: unit.summary)
+            bindText(statement, index: 13, value: unit.excerptText)
+            bindText(statement, index: 14, value: topicTagsJSON)
+            bindText(statement, index: 15, value: peopleJSON)
+            bindText(statement, index: 16, value: entitiesJSON)
+            bindText(statement, index: 17, value: sourceEvidenceRefsJSON)
+            bindText(statement, index: 18, value: sourceExcerptsJSON)
+            bindText(statement, index: 19, value: unit.id)
+            sqlite3_bind_double(statement, 20, now)
+            sqlite3_bind_double(statement, 21, now)
 
             try step(statement)
         }
@@ -913,7 +1115,8 @@ actor SQLiteStore {
         let sql = """
             SELECT id, scope, start_time, end_time, occurred_at, app_name, bundle_id,
                    project, workspace, repo, document, url, task, issue_or_goal, actions_json,
-                   outcome, next_step, status, confidence, evidence_refs_json, entities_json,
+                   outcome, next_step, people_json, blocker, status, confidence, evidence_refs_json,
+                   evidence_excerpts_json, entities_json, artifact_kinds_json, source_kinds_json,
                    summary, source_summary_id, prompt_version
               FROM task_segments
              WHERE occurred_at >= ? AND occurred_at < ?
@@ -939,7 +1142,8 @@ actor SQLiteStore {
         var sql = """
             SELECT id, scope, start_time, end_time, occurred_at, app_name, bundle_id,
                    project, workspace, repo, document, url, task, issue_or_goal, actions_json,
-                   outcome, next_step, status, confidence, evidence_refs_json, entities_json,
+                   outcome, next_step, people_json, blocker, status, confidence, evidence_refs_json,
+                   evidence_excerpts_json, entities_json, artifact_kinds_json, source_kinds_json,
                    summary, source_summary_id, prompt_version
               FROM task_segments
              WHERE (
@@ -948,6 +1152,7 @@ actor SQLiteStore {
                    OR issue_or_goal LIKE ?
                    OR outcome LIKE ?
                    OR next_step LIKE ?
+                   OR blocker LIKE ?
                    OR summary LIKE ?
                    OR app_name LIKE ?
                    OR project LIKE ?
@@ -955,6 +1160,7 @@ actor SQLiteStore {
                    OR repo LIKE ?
                    OR document LIKE ?
                    OR url LIKE ?
+                   OR people_json LIKE ?
                    OR entities_json LIKE ?
              )
         """
@@ -982,8 +1188,10 @@ actor SQLiteStore {
         bindText(statement, index: 11, value: like)
         bindText(statement, index: 12, value: like)
         bindText(statement, index: 13, value: like)
+        bindText(statement, index: 14, value: like)
+        bindText(statement, index: 15, value: like)
 
-        var nextIndex: Int32 = 14
+        var nextIndex: Int32 = 16
         if let start, let end {
             sqlite3_bind_double(statement, nextIndex, start.timeIntervalSince1970)
             sqlite3_bind_double(statement, nextIndex + 1, end.timeIntervalSince1970)
@@ -992,6 +1200,99 @@ actor SQLiteStore {
         sqlite3_bind_int(statement, nextIndex, Int32(max(1, limit)))
 
         return try decodeTaskSegments(from: statement)
+    }
+
+    func queryTranscriptUnits(
+        text: String,
+        start: Date?,
+        end: Date?,
+        limit: Int
+    ) throws -> [TranscriptUnitRecord] {
+        var sql = """
+            SELECT id, evidence_id, occurred_at, app_name, bundle_id, project, workspace, task,
+                   session_id, unit_kind, speaker_label, summary, excerpt_text, topic_tags_json,
+                   people_json, entities_json, source_evidence_refs_json, source_excerpts_json
+              FROM transcript_units
+             WHERE (
+                   ? = ''
+                   OR summary LIKE ?
+                   OR excerpt_text LIKE ?
+                   OR project LIKE ?
+                   OR workspace LIKE ?
+                   OR task LIKE ?
+                   OR app_name LIKE ?
+                   OR session_id LIKE ?
+                   OR people_json LIKE ?
+                   OR entities_json LIKE ?
+                   OR topic_tags_json LIKE ?
+             )
+        """
+
+        if start != nil && end != nil {
+            sql += " AND occurred_at >= ? AND occurred_at < ?"
+        }
+        sql += " ORDER BY occurred_at DESC LIMIT ?;"
+
+        let like = "%\(text)%"
+        var statement: OpaquePointer?
+        try prepare(sql, statement: &statement)
+        defer { sqlite3_finalize(statement) }
+
+        bindText(statement, index: 1, value: text)
+        bindText(statement, index: 2, value: like)
+        bindText(statement, index: 3, value: like)
+        bindText(statement, index: 4, value: like)
+        bindText(statement, index: 5, value: like)
+        bindText(statement, index: 6, value: like)
+        bindText(statement, index: 7, value: like)
+        bindText(statement, index: 8, value: like)
+        bindText(statement, index: 9, value: like)
+        bindText(statement, index: 10, value: like)
+        bindText(statement, index: 11, value: like)
+
+        var nextIndex: Int32 = 12
+        if let start, let end {
+            sqlite3_bind_double(statement, nextIndex, start.timeIntervalSince1970)
+            sqlite3_bind_double(statement, nextIndex + 1, end.timeIntervalSince1970)
+            nextIndex += 2
+        }
+
+        sqlite3_bind_int(statement, nextIndex, Int32(max(1, limit)))
+        return try decodeTranscriptUnits(from: statement)
+    }
+
+    func listTranscriptUnits(start: Date?, end: Date?, limit: Int) throws -> [TranscriptUnitRecord] {
+        var sql = """
+            SELECT id, evidence_id, occurred_at, app_name, bundle_id, project, workspace, task,
+                   session_id, unit_kind, speaker_label, summary, excerpt_text, topic_tags_json,
+                   people_json, entities_json, source_evidence_refs_json, source_excerpts_json
+              FROM transcript_units
+             WHERE 1 = 1
+        """
+
+        if start != nil {
+            sql += " AND occurred_at >= ?"
+        }
+        if end != nil {
+            sql += " AND occurred_at < ?"
+        }
+        sql += " ORDER BY occurred_at DESC LIMIT ?;"
+
+        var statement: OpaquePointer?
+        try prepare(sql, statement: &statement)
+        defer { sqlite3_finalize(statement) }
+
+        var nextIndex: Int32 = 1
+        if let start {
+            sqlite3_bind_double(statement, nextIndex, start.timeIntervalSince1970)
+            nextIndex += 1
+        }
+        if let end {
+            sqlite3_bind_double(statement, nextIndex, end.timeIntervalSince1970)
+            nextIndex += 1
+        }
+        sqlite3_bind_int(statement, nextIndex, Int32(max(1, limit)))
+        return try decodeTranscriptUnits(from: statement)
     }
 
     func listIntervalSummaries(hourStart: Date, hourEnd: Date) throws -> [IntervalSummary] {
@@ -1585,12 +1886,16 @@ actor SQLiteStore {
     private func decodeTaskSegments(from statement: OpaquePointer?) throws -> [TaskSegmentRecord] {
         var rows: [TaskSegmentRecord] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            let statusRaw = string(statement, column: 17) ?? TaskSegmentStatus.unknown.rawValue
+            let statusRaw = string(statement, column: 19) ?? TaskSegmentStatus.unknown.rawValue
             let status = TaskSegmentStatus(rawValue: statusRaw) ?? .unknown
-            let confidence = max(0, min(1, sqlite3_column_double(statement, 18)))
+            let confidence = max(0, min(1, sqlite3_column_double(statement, 20)))
             let actions = decodeStringArray(string(statement, column: 14))
-            let evidenceRefs = decodeStringArray(string(statement, column: 19))
-            let entities = decodeStringArray(string(statement, column: 20))
+            let people = decodeStringArray(string(statement, column: 17))
+            let evidenceRefs = decodeStringArray(string(statement, column: 21))
+            let evidenceExcerpts = decodeStringArray(string(statement, column: 22))
+            let entities = decodeStringArray(string(statement, column: 23))
+            let artifactKinds = decodeStringArray(string(statement, column: 24)).compactMap(ArtifactKind.init(rawValue:))
+            let sourceKinds = decodeStringArray(string(statement, column: 25)).compactMap(PromotedSourceKind.init(rawValue:))
 
             rows.append(
                 TaskSegmentRecord(
@@ -1611,13 +1916,47 @@ actor SQLiteStore {
                     actions: actions,
                     outcome: string(statement, column: 15),
                     nextStep: string(statement, column: 16),
+                    people: people,
+                    blocker: string(statement, column: 18),
                     status: status,
                     confidence: confidence,
                     evidenceRefs: evidenceRefs,
+                    evidenceExcerpts: evidenceExcerpts,
                     entities: entities,
-                    summary: string(statement, column: 21) ?? "",
-                    sourceSummaryID: string(statement, column: 22),
-                    promptVersion: string(statement, column: 23) ?? "v1"
+                    artifactKinds: artifactKinds,
+                    sourceKinds: sourceKinds,
+                    summary: string(statement, column: 26) ?? "",
+                    sourceSummaryID: string(statement, column: 27),
+                    promptVersion: string(statement, column: 28) ?? "v1"
+                )
+            )
+        }
+        return rows
+    }
+
+    private func decodeTranscriptUnits(from statement: OpaquePointer?) throws -> [TranscriptUnitRecord] {
+        var rows: [TranscriptUnitRecord] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            rows.append(
+                TranscriptUnitRecord(
+                    id: string(statement, column: 0) ?? UUID().uuidString,
+                    evidenceID: string(statement, column: 1) ?? "",
+                    occurredAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
+                    appName: string(statement, column: 3),
+                    bundleID: string(statement, column: 4),
+                    project: string(statement, column: 5),
+                    workspace: string(statement, column: 6),
+                    task: string(statement, column: 7),
+                    sessionID: string(statement, column: 8),
+                    kind: TranscriptUnitKind(rawValue: string(statement, column: 9) ?? TranscriptUnitKind.transcriptExcerpt.rawValue) ?? .transcriptExcerpt,
+                    speakerLabel: string(statement, column: 10),
+                    summary: string(statement, column: 11) ?? "",
+                    excerptText: string(statement, column: 12) ?? "",
+                    topicTags: decodeStringArray(string(statement, column: 13)),
+                    people: decodeStringArray(string(statement, column: 14)),
+                    entities: decodeStringArray(string(statement, column: 15)),
+                    sourceEvidenceRefs: decodeStringArray(string(statement, column: 16)),
+                    sourceExcerpts: decodeStringArray(string(statement, column: 17))
                 )
             )
         }
