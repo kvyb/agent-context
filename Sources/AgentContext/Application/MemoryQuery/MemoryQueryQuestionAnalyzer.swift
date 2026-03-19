@@ -4,6 +4,7 @@ struct MemoryQueryQuestionAnalysis: Sendable {
     let focusTerms: [String]
     let requestedDimensions: [String]
     let seeksEvaluation: Bool
+    let seeksWorkSummary: Bool
     let prefersLexicalFirst: Bool
     let prefersDetailedAnswer: Bool
 }
@@ -37,6 +38,21 @@ struct MemoryQueryQuestionAnalyzer: Sendable {
         ]
         let seeksEvaluation = evaluationTerms.contains { lowered.contains($0) }
 
+        let workSummaryTerms = [
+            "what did user do",
+            "what did i do",
+            "what happened in",
+            "worked on",
+            "for work",
+            "work on",
+            "tasks",
+            "projects",
+            "blockers",
+            "takeaways",
+            "struggles"
+        ]
+        let seeksWorkSummary = workSummaryTerms.contains { lowered.contains($0) }
+
         let detailedTerms = [
             "timeline",
             "everything",
@@ -55,6 +71,7 @@ struct MemoryQueryQuestionAnalyzer: Sendable {
             focusTerms: focusTerms,
             requestedDimensions: requestedDimensions,
             seeksEvaluation: seeksEvaluation,
+            seeksWorkSummary: seeksWorkSummary,
             prefersLexicalFirst: prefersLexicalFirst,
             prefersDetailedAnswer: prefersDetailedAnswer
         )

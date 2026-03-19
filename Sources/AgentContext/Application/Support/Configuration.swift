@@ -8,9 +8,9 @@ struct OpenRouterRuntimeConfig: Sendable {
 }
 
 struct MemoryQueryRuntimeConfig: Sendable {
-    let timeoutSeconds: TimeInterval
-    let plannerTimeoutSeconds: TimeInterval
-    let answerTimeoutSeconds: TimeInterval
+    let timeoutSeconds: TimeInterval?
+    let plannerTimeoutSeconds: TimeInterval?
+    let answerTimeoutSeconds: TimeInterval?
     let semanticSearchTimeoutSeconds: TimeInterval
 }
 
@@ -89,9 +89,9 @@ struct TrackerConfig: Sendable {
             timeoutSeconds: max(15, TimeInterval(env["AGENT_CONTEXT_OPENROUTER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 90))
         )
         let memoryQuery = MemoryQueryRuntimeConfig(
-            timeoutSeconds: min(35, max(5, TimeInterval(env["AGENT_CONTEXT_MEMORY_QUERY_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 20))),
-            plannerTimeoutSeconds: min(12, max(2, TimeInterval(env["AGENT_CONTEXT_MEMORY_QUERY_PLANNER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 6))),
-            answerTimeoutSeconds: min(12, max(2, TimeInterval(env["AGENT_CONTEXT_MEMORY_QUERY_ANSWER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 6))),
+            timeoutSeconds: parseOptionalTimeout(env["AGENT_CONTEXT_MEMORY_QUERY_TIMEOUT_SECONDS"]) ?? 60,
+            plannerTimeoutSeconds: parseOptionalTimeout(env["AGENT_CONTEXT_MEMORY_QUERY_PLANNER_TIMEOUT_SECONDS"]),
+            answerTimeoutSeconds: parseOptionalTimeout(env["AGENT_CONTEXT_MEMORY_QUERY_ANSWER_TIMEOUT_SECONDS"]),
             semanticSearchTimeoutSeconds: min(10, max(2, TimeInterval(env["AGENT_CONTEXT_MEM0_SEARCH_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 6)))
         )
 
@@ -118,6 +118,16 @@ struct TrackerConfig: Sendable {
             memoryQuery: memoryQuery
         )
     }
+}
+
+private func parseOptionalTimeout(_ raw: String?) -> TimeInterval? {
+    guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty else {
+        return nil
+    }
+    guard let parsed = Double(raw), parsed > 0 else {
+        return nil
+    }
+    return parsed
 }
 
 private func resolvePythonExecutable(

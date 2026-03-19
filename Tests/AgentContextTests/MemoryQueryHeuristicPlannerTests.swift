@@ -10,6 +10,7 @@ final class MemoryQueryHeuristicPlannerTests: XCTestCase {
         )
 
         XCTAssertTrue(profile.prefersDetailedAnswer)
+        XCTAssertTrue(profile.seeksWorkSummary)
         XCTAssertEqual(profile.requestedDimensions, ["projects", "tasks", "takeaways", "struggles"])
         XCTAssertTrue(profile.focusTerms.contains("manychat"))
     }
@@ -66,6 +67,7 @@ final class MemoryQueryHeuristicPlannerTests: XCTestCase {
         )
 
         XCTAssertEqual(profile.requestedDimensions, ["projects", "people involved", "next steps"])
+        XCTAssertTrue(profile.seeksWorkSummary)
         XCTAssertTrue(profile.focusTerms.contains("core"))
     }
 }

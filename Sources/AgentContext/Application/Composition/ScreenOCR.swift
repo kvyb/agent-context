@@ -68,4 +68,8 @@ final class MemoryQueryService: @unchecked Sendable {
     func execute(request: MemoryQueryRequest) async -> MemoryQueryResult {
         await useCase.execute(request: request)
     }
+
+    func executeDetailed(request: MemoryQueryRequest) async -> MemoryQueryExecutionTrace {
+        await useCase.executeDetailed(request: request)
+    }
 }

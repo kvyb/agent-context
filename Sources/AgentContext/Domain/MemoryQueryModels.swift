@@ -20,12 +20,14 @@ struct MemoryQueryOptions: Sendable {
     let scopeOverride: MemoryQueryScope?
     let maxResults: Int?
     let timeoutSeconds: TimeInterval?
+    let allowFallbacks: Bool
 
     static let `default` = MemoryQueryOptions(
         sources: Set(MemoryEvidenceSource.allCases),
         scopeOverride: nil,
         maxResults: nil,
-        timeoutSeconds: nil
+        timeoutSeconds: nil,
+        allowFallbacks: true
     )
 
     var includesSemanticSearch: Bool {
@@ -180,6 +182,21 @@ struct MemoryQueryResult: Sendable {
     let generatedAt: Date
 }
 
+enum MemoryQueryAnswerOrigin: String, Sendable {
+    case model
+    case fallback
+    case failure
+}
+
+struct MemoryQueryExecutionTrace: Sendable {
+    let result: MemoryQueryResult
+    let mem0Evidence: [MemoryEvidenceHit]
+    let bm25Evidence: [MemoryEvidenceHit]
+    let detailLevel: MemoryQueryDetailLevel
+    let fullContextMode: Bool
+    let answerOrigin: MemoryQueryAnswerOrigin
+}
+
 protocol SemanticMemoryRetrieving: Sendable {
     func retrieve(
         queries: [String],
@@ -199,7 +216,7 @@ protocol MemoryQueryPlanning: Sendable {
         now: Date,
         detailLevel: MemoryQueryDetailLevel,
         timeZone: TimeZone,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval?
     ) async -> MemoryQueryPlanResult?
 }
 
@@ -208,11 +225,12 @@ protocol MemoryQueryAnswering: Sendable {
         question: String,
         scope: MemoryQueryScope,
         detailLevel: MemoryQueryDetailLevel,
+        fullContextMode: Bool,
         now: Date,
         timeZone: TimeZone,
         mem0Evidence: [MemoryEvidenceHit],
         bm25Evidence: [MemoryEvidenceHit],
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval?
     ) async -> MemoryQueryAnswerResult?
 }
 

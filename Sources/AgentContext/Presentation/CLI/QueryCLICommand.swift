@@ -20,7 +20,7 @@ enum QueryCLIArgumentError: Error, LocalizedError {
         case let .invalidInteger(flag, value):
             return "invalid \(flag) value '\(value)'; expected a positive integer"
         case let .invalidNumber(flag, value):
-            return "invalid \(flag) value '\(value)'; expected a positive number"
+            return "invalid \(flag) value '\(value)'; expected a positive number or 'none'"
         case let .invalidDate(flag, value):
             return "invalid \(flag) value '\(value)'; expected YYYY-MM-DD or ISO8601"
         case .invalidDateRange:
@@ -125,9 +125,11 @@ enum QueryCLICommand {
                 "--start",
                 "--end",
                 "--max-results",
-                "--timeout"
+                "--timeout",
+                "--no-fallback",
+                "--strict-agent"
             ].contains(arg) {
-                skipNext = true
+                skipNext = ["--no-fallback", "--strict-agent"].contains(arg) ? false : true
                 continue
             }
             if arg.hasPrefix("--") {
@@ -166,10 +168,15 @@ enum QueryCLICommand {
 
         let timeoutSeconds: TimeInterval?
         if let raw = argumentValue(flag: "--timeout", in: arguments) {
-            guard let parsed = Double(raw), parsed > 0 else {
-                throw QueryCLIArgumentError.invalidNumber(flag: "--timeout", value: raw)
+            let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if ["none", "off", "unlimited"].contains(normalized) {
+                timeoutSeconds = nil
+            } else {
+                guard let parsed = Double(raw), parsed > 0 else {
+                    throw QueryCLIArgumentError.invalidNumber(flag: "--timeout", value: raw)
+                }
+                timeoutSeconds = parsed
             }
-            timeoutSeconds = min(parsed, 35)
         } else {
             timeoutSeconds = nil
         }
@@ -178,7 +185,8 @@ enum QueryCLICommand {
             sources: sources,
             scopeOverride: customScope(start: parsedStart, end: parsedEnd),
             maxResults: maxResults,
-            timeoutSeconds: timeoutSeconds
+            timeoutSeconds: timeoutSeconds,
+            allowFallbacks: !(arguments.contains("--no-fallback") || arguments.contains("--strict-agent"))
         )
     }
 

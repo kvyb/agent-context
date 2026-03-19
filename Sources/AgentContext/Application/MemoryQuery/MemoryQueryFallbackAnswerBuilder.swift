@@ -17,7 +17,8 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
         scopeLabel: String?,
         detailLevel: MemoryQueryDetailLevel,
         mem0Evidence: [MemoryEvidenceHit],
-        bm25Evidence: [MemoryEvidenceHit]
+        bm25Evidence: [MemoryEvidenceHit],
+        fullContextMode: Bool = false
     ) -> MemoryQueryAnswerPayload {
         let analysis = questionAnalyzer.analyze(question: question)
         let combinedEvidence = combinedEvidence(
@@ -30,12 +31,18 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
             scopeLabel: scopeLabel,
             detailLevel: detailLevel,
             analysis: analysis,
-            evidence: combinedEvidence
+            evidence: combinedEvidence,
+            fullContextMode: fullContextMode
         ) {
             return dimensionAwareAnswer
         }
 
-        let evidenceLimit = detailLevel == .detailed ? 8 : 5
+        let evidenceLimit: Int
+        if fullContextMode {
+            evidenceLimit = detailLevel == .detailed ? 14 : 8
+        } else {
+            evidenceLimit = detailLevel == .detailed ? 8 : 5
+        }
         let topEvidence = Array(combinedEvidence.prefix(evidenceLimit))
         let scopedSuffix = scopeLabel?.nilIfEmpty.map { " for \($0)" } ?? ""
         let sourceSummary = sourceSummary(
@@ -72,7 +79,8 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
         scopeLabel: String?,
         detailLevel: MemoryQueryDetailLevel,
         analysis: MemoryQueryQuestionAnalysis,
-        evidence: [MemoryEvidenceHit]
+        evidence: [MemoryEvidenceHit],
+        fullContextMode: Bool
     ) -> MemoryQueryAnswerPayload? {
         guard !analysis.requestedDimensions.isEmpty || analysis.seeksEvaluation else {
             return nil
@@ -86,7 +94,12 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
             return nil
         }
 
-        let evidenceLimit = detailLevel == .detailed ? 14 : 8
+        let evidenceLimit: Int
+        if fullContextMode {
+            evidenceLimit = detailLevel == .detailed ? 20 : 12
+        } else {
+            evidenceLimit = detailLevel == .detailed ? 14 : 8
+        }
         let topEvidence = Array(rankedEvidence.prefix(evidenceLimit))
         let dimensionLimit = detailLevel == .detailed ? 6 : 4
         var dimensionSections: [String] = []
@@ -127,6 +140,9 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
         var paragraphs: [String] = [summary]
         if !dimensionSections.isEmpty {
             paragraphs.append(contentsOf: dimensionSections)
+        }
+        if fullContextMode {
+            paragraphs.append("The retrieved evidence appears to cover a narrowly scoped corpus, so this answer uses the full local record rather than only a few top hits.")
         }
         if shouldMentionTranscriptGap(question: question, evidence: topEvidence) {
             paragraphs.append("I found related interview or meeting evidence, but not enough direct transcript content to fully answer every requested dimension.")
@@ -335,12 +351,30 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
     ) -> Double {
         var score = sourceScore(hit)
         let loweredText = evidenceText(hit)
+        let retrievalUnit = hit.metadata["retrieval_unit"] ?? ""
+        let structuralText = [
+            hit.project?.nilIfEmpty,
+            hit.metadata["project"]?.nilIfEmpty,
+            hit.metadata["repo"]?.nilIfEmpty,
+            hit.metadata["workspace"]?.nilIfEmpty,
+            hit.metadata["task"]?.nilIfEmpty
+        ]
+        .compactMap { $0 }
+        .joined(separator: " ")
+        .lowercased()
 
         if analysis.prefersLexicalFirst && isDirectTranscriptEvidence(hit) {
             score += 1.8
         }
         if loweredQuestion.contains("transcript"), isDirectTranscriptEvidence(hit) {
             score += 0.8
+        }
+        if analysis.seeksWorkSummary {
+            if retrievalUnit == "task_segment" {
+                score += 0.55
+            } else if retrievalUnit == "artifact_evidence" {
+                score += 0.08
+            }
         }
         if analysis.prefersLexicalFirst,
            loweredQuestion.contains("transcript"),
@@ -350,13 +384,28 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
         }
 
         var matchedFocusTerms = 0
+        var structuralFocusMatches = 0
         for term in analysis.focusTerms {
-            guard loweredText.contains(term) else { continue }
-            matchedFocusTerms += 1
-            score += term.count >= 5 ? 0.45 : 0.25
+            if structuralText.contains(term) {
+                matchedFocusTerms += 1
+                structuralFocusMatches += 1
+                score += term.count >= 5 ? 0.6 : 0.35
+            } else if loweredText.contains(term) {
+                matchedFocusTerms += 1
+                score += term.count >= 5 ? 0.45 : 0.25
+            }
         }
         if !analysis.focusTerms.isEmpty && matchedFocusTerms == 0 {
             score -= 0.35
+        }
+        if analysis.seeksWorkSummary,
+           !analysis.focusTerms.isEmpty,
+           structuralFocusMatches == 0 {
+            if retrievalUnit == "artifact_evidence" {
+                score -= 0.65
+            } else if retrievalUnit == "memory_summary" {
+                score -= 0.3
+            }
         }
 
         for dimension in analysis.requestedDimensions {
@@ -376,8 +425,10 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
     }
 
     private func isDirectTranscriptEvidence(_ hit: MemoryEvidenceHit) -> Bool {
-        hit.metadata["artifact_kind"] == ArtifactKind.audio.rawValue
-            && hit.metadata["has_transcript"] == "true"
+        let retrievalUnit = hit.metadata["retrieval_unit"] ?? ""
+        return retrievalUnit == "transcript_unit"
+            || (hit.metadata["artifact_kind"] == ArtifactKind.audio.rawValue
+                && hit.metadata["has_transcript"] == "true")
     }
 
     private func dimensionBullets(

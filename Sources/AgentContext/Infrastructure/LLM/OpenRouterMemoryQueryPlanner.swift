@@ -23,12 +23,13 @@ final class OpenRouterMemoryQueryPlanner: MemoryQueryPlanning, @unchecked Sendab
         now: Date,
         detailLevel: MemoryQueryDetailLevel,
         timeZone: TimeZone,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval?
     ) async -> MemoryQueryPlanResult? {
         guard let apiKey = apiKeyProvider()?.nilIfEmpty else {
             return nil
         }
-        guard timeoutSeconds > 0 else {
+        let effectiveTimeout = timeoutSeconds.map { min(openRouterConfig.timeoutSeconds, $0) } ?? openRouterConfig.timeoutSeconds
+        guard effectiveTimeout > 0 else {
             return nil
         }
 
@@ -38,7 +39,7 @@ final class OpenRouterMemoryQueryPlanner: MemoryQueryPlanning, @unchecked Sendab
                 endpoint: openRouterConfig.endpoint,
                 model: openRouterConfig.model,
                 reasoningEffort: openRouterConfig.reasoningEffort,
-                timeoutSeconds: min(openRouterConfig.timeoutSeconds, timeoutSeconds)
+                timeoutSeconds: effectiveTimeout
             ),
             settings: settings
         )
@@ -56,6 +57,7 @@ final class OpenRouterMemoryQueryPlanner: MemoryQueryPlanning, @unchecked Sendab
             }
             return MemoryQueryPlanResult(plan: plan, usage: response.usage)
         } catch {
+            fputs("[agent-context] Planner error: \(error.localizedDescription)\n", stderr)
             return nil
         }
     }

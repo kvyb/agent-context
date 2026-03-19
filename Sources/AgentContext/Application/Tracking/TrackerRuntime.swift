@@ -91,6 +91,7 @@ final class TrackerRuntime: @unchecked Sendable {
     private let retentionManager: ArtifactRetentionManager
     private let trackerAgent: TrackerAgent
     private let memoryQueryService: MemoryQueryService
+    private let memoryQueryEvaluationService: MemoryQueryEvaluationService
     private let calendar: Calendar
     private let retentionQueue = DispatchQueue(label: "agent-context.retention", qos: .utility)
     private var retentionTimer: DispatchSourceTimer?
@@ -174,6 +175,16 @@ final class TrackerRuntime: @unchecked Sendable {
             apiKeyProvider: apiKeyProvider,
             openRouterConfig: config.openRouter,
             runtimeConfig: config.memoryQuery
+        )
+        memoryQueryEvaluationService = MemoryQueryEvaluationService(
+            queryService: memoryQueryService,
+            evaluator: OpenRouterMemoryQueryEvaluator(
+                openRouterConfig: config.openRouter,
+                settingsProvider: settingsProvider,
+                apiKeyProvider: apiKeyProvider,
+                codec: MemoryQueryEvaluationCodec()
+            ),
+            usageWriter: SQLiteUsageEventWriter(database: database)
         )
 
         var calendar = Calendar(identifier: .gregorian)
@@ -364,6 +375,22 @@ final class TrackerRuntime: @unchecked Sendable {
         onProgress: (@Sendable (String) -> Void)? = nil
     ) async -> String {
         await memoryQueryService.render(
+            request: MemoryQueryRequest(
+                question: query,
+                outputFormat: format,
+                options: options,
+                onProgress: onProgress
+            )
+        )
+    }
+
+    func evaluateMemoryQuery(
+        _ query: String,
+        format: MemoryQueryOutputFormat = .text,
+        options: MemoryQueryOptions = .default,
+        onProgress: (@Sendable (String) -> Void)? = nil
+    ) async -> String {
+        await memoryQueryEvaluationService.render(
             request: MemoryQueryRequest(
                 question: query,
                 outputFormat: format,

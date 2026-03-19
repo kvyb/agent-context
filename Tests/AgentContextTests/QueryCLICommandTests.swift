@@ -67,6 +67,30 @@ final class QueryCLICommandTests: XCTestCase {
         XCTAssertEqual(options?.requestOptions.scopeOverride?.end.map(formatter.string), "2026-03-17")
     }
 
+    func testParsesNoFallbackFlag() throws {
+        let options = try QueryCLICommand.parse(arguments: [
+            "agent-context",
+            "query",
+            "status",
+            "--json",
+            "--no-fallback"
+        ])
+
+        XCTAssertEqual(options?.outputFormat, .json)
+        XCTAssertEqual(options?.requestOptions.allowFallbacks, false)
+    }
+
+    func testParsesUnlimitedTimeoutFlag() throws {
+        let options = try QueryCLICommand.parse(arguments: [
+            "agent-context",
+            "query",
+            "status",
+            "--timeout", "none"
+        ])
+
+        XCTAssertNil(options?.requestOptions.timeoutSeconds)
+    }
+
     func testInvalidSourceThrows() {
         XCTAssertThrowsError(
             try QueryCLICommand.parse(arguments: ["agent-context", "query", "status", "--source", "transcripts"])

@@ -16,6 +16,8 @@ do {
 
     if let settingsOptions = try SettingsCLICommand.parse(arguments: CommandLine.arguments) {
         runSettingsMode(settingsOptions)
+    } else if let options = try EvaluationCLICommand.parse(arguments: CommandLine.arguments) {
+        runEvaluationMode(options)
     } else if let options = try QueryCLICommand.parse(arguments: CommandLine.arguments) {
         runQueryMode(options)
     } else if CommandLine.arguments.contains("--cli") {
@@ -80,6 +82,32 @@ private func runQueryMode(_ options: QueryCLIOptions) {
     }
 }
 
+private func runEvaluationMode(_ options: EvaluationCLIOptions) {
+    do {
+        let runtime = try TrackerRuntime()
+        let group = DispatchGroup()
+        group.enter()
+        Task {
+            let progressReporter: @Sendable (String) -> Void = { message in
+                guard let data = "[agent-context] \(message)\n".data(using: .utf8) else { return }
+                FileHandle.standardError.write(data)
+            }
+            let result = await runtime.evaluateMemoryQuery(
+                options.query,
+                format: options.outputFormat,
+                options: options.requestOptions,
+                onProgress: progressReporter
+            )
+            print(result)
+            group.leave()
+        }
+        group.wait()
+    } catch {
+        fputs("fatal: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
+
 private func runSettingsMode(_ options: SettingsCLIOptions) {
     do {
         let runtime = try TrackerRuntime()
@@ -117,8 +145,9 @@ private enum RootCLICommand {
         """
         Usage:
           \(programName) [--cli]
-          \(programName) query "<question>" [--json|--format text|json] [--source all|mem0|bm25] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS<=30]
-          \(programName) --query "<question>" [--format text|json] [--source all|mem0|bm25] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS<=30]
+          \(programName) query "<question>" [--json|--format text|json] [--source all|mem0|bm25] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS|none]
+          \(programName) evaluate-query "<question>" [--json|--format text|json] [--source all|mem0|bm25] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS|none]
+          \(programName) --query "<question>" [--format text|json] [--source all|mem0|bm25] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS|none]
           \(programName) --set-user-aliases "<alias1,alias2,...>"
           \(programName) --help
           \(programName) --version
@@ -126,6 +155,7 @@ private enum RootCLICommand {
         Notes:
           - Run without flags to open the Agent Context menu bar app.
           - Query commands return natural-language memory answers and stream progress to stderr.
+          - evaluate-query runs the query first, then asks Gemini Flash Lite to score retrieval quality and answer groundedness.
         """
     }
 

@@ -1,6 +1,7 @@
 import Foundation
 
 final class MemoryQueryUseCase: @unchecked Sendable {
+    private let maxApproximateResponseTokens = 2_000
     private let semanticRetriever: SemanticMemoryRetrieving
     private let lexicalRetriever: LexicalMemoryRetrieving
     private let planner: MemoryQueryPlanning
@@ -38,15 +39,26 @@ final class MemoryQueryUseCase: @unchecked Sendable {
     }
 
     func execute(request: MemoryQueryRequest) async -> MemoryQueryResult {
+        await executeDetailed(request: request).result
+    }
+
+    func executeDetailed(request: MemoryQueryRequest) async -> MemoryQueryExecutionTrace {
         let trimmed = request.question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return emptyQueryResult(for: request.question)
+            return trace(
+                result: emptyQueryResult(for: request.question),
+                mem0Evidence: [],
+                bm25Evidence: [],
+                detailLevel: .concise,
+                fullContextMode: false,
+                answerOrigin: .failure
+            )
         }
 
         let now = referenceDateProvider()
         let timeZone = calendar.timeZone
         let fallbackScope = request.options.scopeOverride ?? scopeParser.inferScope(for: trimmed, referenceDate: now)
-        let deadline = Date().addingTimeInterval(effectiveOverallTimeout(for: request.options))
+        let deadline = overallDeadline(for: request.options)
         let queryProfile = heuristicPlanner.profile(for: trimmed)
 
         var detailLevel: MemoryQueryDetailLevel = queryProfile.prefersDetailedAnswer ? .detailed : .concise
@@ -56,6 +68,7 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         var executedQueryKeys = Set<String>()
         var executedQueries: [String] = []
         var previousEvidenceCount = 0
+        var fullContextMode = false
 
         let absoluteMaxPasses = 3
         for pass in 1...absoluteMaxPasses {
@@ -79,8 +92,11 @@ final class MemoryQueryUseCase: @unchecked Sendable {
                 reserveSeconds: plannerReserveSeconds(request: request, profile: queryProfile)
             )
             let plannerResult: MemoryQueryPlanResult?
-            if plannerTimeout >= 1 {
-                request.onProgress?("Planning retrieval pass \(pass) (\(formattedSeconds(plannerTimeout)) budget)...")
+            if let plannerTimeout, plannerTimeout < 1 {
+                plannerResult = nil
+            } else {
+                let plannerBudgetLabel = plannerTimeout.map { formattedSeconds($0) } ?? "no stage cap"
+                request.onProgress?("Planning retrieval pass \(pass) (\(plannerBudgetLabel) budget)...")
                 plannerResult = await planner.plan(
                     question: planningQuestion,
                     now: now,
@@ -88,21 +104,45 @@ final class MemoryQueryUseCase: @unchecked Sendable {
                     timeZone: timeZone,
                     timeoutSeconds: plannerTimeout
                 )
-            } else {
-                plannerResult = nil
             }
 
-            let effectivePlannerResult = plannerResult ?? heuristicPlanner.fallbackPlanResult(
-                for: trimmed,
-                fallbackScope: fallbackScope,
-                detailLevel: detailLevel,
-                requestOptions: request.options
-            )
+            let effectivePlannerResult: MemoryQueryPlanResult?
+            if let plannerResult {
+                effectivePlannerResult = plannerResult
+            } else if request.options.allowFallbacks {
+                effectivePlannerResult = heuristicPlanner.fallbackPlanResult(
+                    for: trimmed,
+                    fallbackScope: fallbackScope,
+                    detailLevel: detailLevel,
+                    requestOptions: request.options
+                )
+            } else {
+                effectivePlannerResult = nil
+            }
 
             if let usage = plannerResult?.usage {
                 await usageWriter.appendUsageEvent(usage)
             } else if pass == 1 {
-                request.onProgress?("Planner unavailable; using heuristic local query planner.")
+                if request.options.allowFallbacks {
+                    request.onProgress?("Planner unavailable; using heuristic local query planner.")
+                } else {
+                    request.onProgress?("Planner unavailable and fallback is disabled.")
+                }
+            }
+
+            if effectivePlannerResult == nil {
+                return trace(
+                    result: failureResult(
+                        for: trimmed,
+                        scope: scope,
+                        message: "The query agent could not produce a retrieval plan within the allotted budget, and fallback planning is disabled."
+                    ),
+                    mem0Evidence: mem0Evidence,
+                    bm25Evidence: bm25Evidence,
+                    detailLevel: detailLevel,
+                    fullContextMode: fullContextMode,
+                    answerOrigin: .failure
+                )
             }
 
             if let plannedLevel = effectivePlannerResult?.plan.detailLevel {
@@ -151,8 +191,25 @@ final class MemoryQueryUseCase: @unchecked Sendable {
             let gained = totalEvidenceCount - previousEvidenceCount
             previousEvidenceCount = totalEvidenceCount
 
+            if shouldSwitchToFullContextMode(
+                scope: scope,
+                profile: queryProfile,
+                mem0Evidence: mem0Evidence,
+                bm25Evidence: bm25Evidence
+            ) {
+                fullContextMode = true
+                request.onProgress?("Scoped evidence corpus is small and direct; preserving the remaining budget for full-context synthesis.")
+                break
+            }
+
             if queryProfile.prefersLexicalFirst, hasTranscriptCoverage(in: bm25Evidence) {
                 request.onProgress?("Captured transcript evidence locally; preserving remaining budget for answer synthesis.")
+                fullContextMode = shouldSwitchToFullContextMode(
+                    scope: scope,
+                    profile: queryProfile,
+                    mem0Evidence: mem0Evidence,
+                    bm25Evidence: bm25Evidence
+                )
                 break
             }
 
@@ -164,10 +221,17 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         }
 
         guard !mem0Evidence.isEmpty || !bm25Evidence.isEmpty else {
-            return noMatchesResult(for: trimmed, scope: scope)
+            return trace(
+                result: noMatchesResult(for: trimmed, scope: scope),
+                mem0Evidence: mem0Evidence,
+                bm25Evidence: bm25Evidence,
+                detailLevel: detailLevel,
+                fullContextMode: fullContextMode,
+                answerOrigin: .failure
+            )
         }
 
-        let payload = await resolveAnswerPayload(
+        let answerOutput = await resolveAnswerPayload(
             question: trimmed,
             scope: scope,
             detailLevel: detailLevel,
@@ -175,20 +239,29 @@ final class MemoryQueryUseCase: @unchecked Sendable {
             timeZone: timeZone,
             mem0Evidence: mem0Evidence,
             bm25Evidence: bm25Evidence,
+            fullContextMode: fullContextMode,
             deadline: deadline,
             request: request
         )
+        let payload = boundedPayload(answerOutput.payload)
 
-        return MemoryQueryResult(
-            query: trimmed,
-            answer: payload.answer,
-            keyPoints: payload.keyPoints,
-            supportingEvents: payload.supportingEvents,
-            insufficientEvidence: payload.insufficientEvidence,
-            mem0SemanticCount: mem0Evidence.count,
-            bm25StoreCount: bm25Evidence.count,
-            scope: scope,
-            generatedAt: Date()
+        return trace(
+            result: MemoryQueryResult(
+                query: trimmed,
+                answer: payload.answer,
+                keyPoints: payload.keyPoints,
+                supportingEvents: payload.supportingEvents,
+                insufficientEvidence: payload.insufficientEvidence,
+                mem0SemanticCount: mem0Evidence.count,
+                bm25StoreCount: bm25Evidence.count,
+                scope: scope,
+                generatedAt: Date()
+            ),
+            mem0Evidence: mem0Evidence,
+            bm25Evidence: bm25Evidence,
+            detailLevel: detailLevel,
+            fullContextMode: fullContextMode,
+            answerOrigin: answerOutput.origin
         )
     }
 
@@ -220,6 +293,96 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         )
     }
 
+    private func failureResult(for query: String, scope: MemoryQueryScope, message: String) -> MemoryQueryResult {
+        MemoryQueryResult(
+            query: query,
+            answer: message,
+            keyPoints: [],
+            supportingEvents: [],
+            insufficientEvidence: true,
+            mem0SemanticCount: 0,
+            bm25StoreCount: 0,
+            scope: scope,
+            generatedAt: Date()
+        )
+    }
+
+    private func trace(
+        result: MemoryQueryResult,
+        mem0Evidence: [MemoryEvidenceHit],
+        bm25Evidence: [MemoryEvidenceHit],
+        detailLevel: MemoryQueryDetailLevel,
+        fullContextMode: Bool,
+        answerOrigin: MemoryQueryAnswerOrigin
+    ) -> MemoryQueryExecutionTrace {
+        MemoryQueryExecutionTrace(
+            result: result,
+            mem0Evidence: mem0Evidence,
+            bm25Evidence: bm25Evidence,
+            detailLevel: detailLevel,
+            fullContextMode: fullContextMode,
+            answerOrigin: answerOrigin
+        )
+    }
+
+    private func boundedPayload(_ payload: MemoryQueryAnswerPayload) -> MemoryQueryAnswerPayload {
+        var answer = payload.answer
+        var keyPoints = payload.keyPoints
+        var supportingEvents = payload.supportingEvents
+
+        while approximateTokenCount(
+            answer: answer,
+            keyPoints: keyPoints,
+            supportingEvents: supportingEvents
+        ) > maxApproximateResponseTokens {
+            if !supportingEvents.isEmpty {
+                supportingEvents.removeLast()
+                continue
+            }
+            if !keyPoints.isEmpty {
+                keyPoints.removeLast()
+                continue
+            }
+            let trimmed = trimmedText(answer, targetTokenBudget: maxApproximateResponseTokens - 64)
+            if trimmed == answer {
+                break
+            }
+            answer = trimmed
+        }
+
+        return MemoryQueryAnswerPayload(
+            answer: answer,
+            keyPoints: keyPoints,
+            supportingEvents: supportingEvents,
+            insufficientEvidence: payload.insufficientEvidence
+        )
+    }
+
+    private func approximateTokenCount(
+        answer: String,
+        keyPoints: [String],
+        supportingEvents: [String]
+    ) -> Int {
+        let aggregate = ([answer] + keyPoints + supportingEvents).joined(separator: "\n")
+        return max(1, Int(ceil(Double(aggregate.count) / 4.0)))
+    }
+
+    private func trimmedText(_ text: String, targetTokenBudget: Int) -> String {
+        let targetCharacters = max(160, targetTokenBudget * 4)
+        guard text.count > targetCharacters else {
+            return text
+        }
+
+        let cutoffIndex = text.index(text.startIndex, offsetBy: targetCharacters)
+        let prefix = String(text[..<cutoffIndex])
+        let candidate = prefix
+            .split(separator: " ")
+            .dropLast()
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return candidate.isEmpty ? String(prefix) : candidate + "..."
+    }
+
     private func resolveAnswerPayload(
         question: String,
         scope: MemoryQueryScope,
@@ -228,23 +391,29 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         timeZone: TimeZone,
         mem0Evidence: [MemoryEvidenceHit],
         bm25Evidence: [MemoryEvidenceHit],
-        deadline: Date,
+        fullContextMode: Bool,
+        deadline: Date?,
         request: MemoryQueryRequest
-    ) async -> MemoryQueryAnswerPayload {
+    ) async -> ResolvedAnswerPayload {
         let answerTimeout = stageBudget(
             preferred: runtimeConfig.answerTimeoutSeconds,
             deadline: deadline,
             reserveSeconds: 0
         )
-        if answerTimeout >= 1 {
-            request.onProgress?("Synthesizing answer (\(formattedSeconds(answerTimeout)) budget)...")
+        if let answerTimeout {
+            if answerTimeout >= 1 {
+                request.onProgress?("Synthesizing answer (\(formattedSeconds(answerTimeout)) budget)...")
+            }
+        } else {
+            request.onProgress?("Synthesizing answer (no stage cap)...")
         }
 
-        if answerTimeout >= 1,
+        if (answerTimeout ?? 1) >= 1,
            let answerResult = await answerer.answer(
                 question: question,
                 scope: scope,
                 detailLevel: detailLevel,
+                fullContextMode: fullContextMode,
                 now: now,
                 timeZone: timeZone,
                 mem0Evidence: mem0Evidence,
@@ -254,40 +423,73 @@ final class MemoryQueryUseCase: @unchecked Sendable {
             if let usage = answerResult.usage {
                 await usageWriter.appendUsageEvent(usage)
             }
-            return answerResult.payload
+            return ResolvedAnswerPayload(payload: answerResult.payload, origin: .model)
         }
 
-        request.onProgress?("Answer model unavailable or timed out; returning evidence summary.")
-        return fallbackAnswerBuilder.build(
-            question: question,
-            scopeLabel: scope.label,
-            detailLevel: detailLevel,
-            mem0Evidence: mem0Evidence,
-            bm25Evidence: bm25Evidence
+        if request.options.allowFallbacks {
+            request.onProgress?("Answer model unavailable or timed out; returning evidence summary.")
+            return ResolvedAnswerPayload(
+                payload: fallbackAnswerBuilder.build(
+                    question: question,
+                    scopeLabel: scope.label,
+                    detailLevel: detailLevel,
+                    mem0Evidence: mem0Evidence,
+                    bm25Evidence: bm25Evidence,
+                    fullContextMode: fullContextMode
+                ),
+                origin: .fallback
+            )
+        }
+
+        request.onProgress?("Answer model unavailable and fallback is disabled.")
+        return ResolvedAnswerPayload(
+            payload: MemoryQueryAnswerPayload(
+                answer: "The query agent retrieved evidence but could not synthesize a final answer within the allotted budget, and fallback answering is disabled.",
+                keyPoints: [],
+                supportingEvents: [],
+                insufficientEvidence: true
+            ),
+            origin: .failure
         )
     }
 
-    private func effectiveOverallTimeout(for options: MemoryQueryOptions) -> TimeInterval {
+    private func overallDeadline(for options: MemoryQueryOptions) -> Date? {
         let requested = options.timeoutSeconds ?? runtimeConfig.timeoutSeconds
-        return min(35, max(5, requested))
+        guard let requested else {
+            return nil
+        }
+        return Date().addingTimeInterval(max(1, requested))
     }
 
-    private func remainingSeconds(until deadline: Date) -> TimeInterval {
-        max(0, deadline.timeIntervalSinceNow)
+    private func remainingSeconds(until deadline: Date?) -> TimeInterval {
+        guard let deadline else {
+            return .greatestFiniteMagnitude
+        }
+        return max(0, deadline.timeIntervalSinceNow)
     }
 
     private func stageBudget(
-        preferred: TimeInterval,
-        deadline: Date,
+        preferred: TimeInterval?,
+        deadline: Date?,
         reserveSeconds: TimeInterval
-    ) -> TimeInterval {
+    ) -> TimeInterval? {
         let remaining = remainingSeconds(until: deadline)
+        if remaining == .greatestFiniteMagnitude {
+            return preferred
+        }
+
         let reserved = max(0, reserveSeconds)
         let protectedRemaining = max(0, remaining - reserved)
-        if protectedRemaining >= 1 {
-            return min(preferred, protectedRemaining)
+        if let preferred {
+            if protectedRemaining >= 1 {
+                return min(preferred, protectedRemaining)
+            }
+            return min(preferred, remaining)
         }
-        return min(preferred, remaining)
+        if protectedRemaining >= 1 {
+            return protectedRemaining
+        }
+        return remaining > 0 ? remaining : nil
     }
 
     private func executePlannedSteps(
@@ -295,7 +497,7 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         scope: MemoryQueryScope,
         detailLevel: MemoryQueryDetailLevel,
         retrievalPlan: MemoryQueryRetrievalPlan,
-        deadline: Date,
+        deadline: Date?,
         request: MemoryQueryRequest,
         profile: QueryIntentProfile
     ) async -> StepExecutionOutput {
@@ -356,7 +558,7 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         queries: [String],
         scope: MemoryQueryScope,
         retrievalPlan: MemoryQueryRetrievalPlan,
-        deadline: Date,
+        deadline: Date?,
         request: MemoryQueryRequest,
         profile: QueryIntentProfile
     ) async -> [MemoryEvidenceHit] {
@@ -369,7 +571,7 @@ final class MemoryQueryUseCase: @unchecked Sendable {
             deadline: deadline,
             reserveSeconds: semanticReserveSeconds(request: request, profile: profile)
         )
-        guard timeout >= 1 else {
+        guard let timeout, timeout >= 1 else {
             return []
         }
 
@@ -386,7 +588,7 @@ final class MemoryQueryUseCase: @unchecked Sendable {
         scope: MemoryQueryScope,
         detailLevel: MemoryQueryDetailLevel,
         retrievalPlan: MemoryQueryRetrievalPlan,
-        deadline: Date
+        deadline: Date?
     ) async -> [MemoryEvidenceHit] {
         guard remainingSeconds(until: deadline) > 0 else {
             return []
@@ -714,6 +916,52 @@ final class MemoryQueryUseCase: @unchecked Sendable {
                 && hit.metadata["has_transcript"] == "true"
         }.count >= 2
     }
+
+    private func shouldSwitchToFullContextMode(
+        scope: MemoryQueryScope,
+        profile: QueryIntentProfile,
+        mem0Evidence: [MemoryEvidenceHit],
+        bm25Evidence: [MemoryEvidenceHit]
+    ) -> Bool {
+        let combinedCount = mem0Evidence.count + bm25Evidence.count
+        guard combinedCount > 0 else {
+            return false
+        }
+
+        let directLocalEvidence = bm25Evidence.filter {
+            guard let unit = $0.metadata["retrieval_unit"] else { return false }
+            return unit == "task_segment" || unit == "transcript_chunk" || unit == "transcript_unit" || unit == "artifact_evidence"
+        }
+        guard !directLocalEvidence.isEmpty else {
+            return false
+        }
+
+        let scopedDuration: TimeInterval? = {
+            guard let start = scope.start, let end = scope.end else { return nil }
+            return max(0, end.timeIntervalSince(start))
+        }()
+
+        if profile.prefersLexicalFirst,
+           hasTranscriptCoverage(in: bm25Evidence),
+           directLocalEvidence.count <= 18 {
+            return true
+        }
+
+        if profile.seeksWorkSummary,
+           let scopedDuration,
+           scopedDuration <= 60 * 60 * 48,
+           directLocalEvidence.count <= 16 {
+            return true
+        }
+
+        if let scopedDuration,
+           scopedDuration <= 60 * 60 * 12,
+           combinedCount <= 12 {
+            return true
+        }
+
+        return false
+    }
 }
 
 private struct MemoryQueryRetrievalPlan {
@@ -730,4 +978,9 @@ private struct MemoryQueryRetrievalPlan {
 private struct StepExecutionOutput {
     var mem0Hits: [MemoryEvidenceHit] = []
     var bm25Hits: [MemoryEvidenceHit] = []
+}
+
+private struct ResolvedAnswerPayload {
+    let payload: MemoryQueryAnswerPayload
+    let origin: MemoryQueryAnswerOrigin
 }

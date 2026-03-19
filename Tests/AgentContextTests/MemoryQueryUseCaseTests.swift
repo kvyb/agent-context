@@ -114,6 +114,81 @@ final class MemoryQueryUseCaseTests: XCTestCase {
         XCTAssertTrue(result.insufficientEvidence)
     }
 
+    func testUseCaseFailsClearlyWhenPlannerFallbackIsDisabled() async {
+        let semantic = FakeSemanticRetriever(hits: [])
+        let lexical = FakeLexicalRetriever(hits: [])
+        let useCase = MemoryQueryUseCase(
+            semanticRetriever: semantic,
+            lexicalRetriever: lexical,
+            planner: FakePlanner(result: nil),
+            answerer: FakeAnswerer(result: nil),
+            usageWriter: FakeUsageWriter(),
+            scopeParser: MemoryQueryScopeParser(),
+            runtimeConfig: sampleRuntimeConfig()
+        )
+
+        let result = await useCase.execute(
+            request: MemoryQueryRequest(
+                question: "status",
+                outputFormat: .text,
+                options: MemoryQueryOptions(
+                    sources: Set(MemoryEvidenceSource.allCases),
+                    scopeOverride: nil,
+                    maxResults: 5,
+                    timeoutSeconds: 10,
+                    allowFallbacks: false
+                )
+            )
+        )
+
+        XCTAssertTrue(result.answer.contains("could not produce a retrieval plan"))
+        XCTAssertEqual(result.mem0SemanticCount, 0)
+        XCTAssertEqual(result.bm25StoreCount, 0)
+    }
+
+    func testUseCaseFailsClearlyWhenAnswerFallbackIsDisabled() async {
+        let lexical = FakeLexicalRetriever(hits: [
+            sampleHit(id: "b1", source: .bm25Store, text: "Direct evidence about project status", score: 0.9)
+        ])
+        let planner = FakePlanner(
+            result: MemoryQueryPlanResult(
+                plan: MemoryQueryPlan(
+                    queries: ["project status"],
+                    scope: MemoryQueryScope(start: nil, end: nil, label: "this week")
+                ),
+                usage: nil
+            )
+        )
+        let useCase = MemoryQueryUseCase(
+            semanticRetriever: FakeSemanticRetriever(hits: []),
+            lexicalRetriever: lexical,
+            planner: planner,
+            answerer: FakeAnswerer(result: nil),
+            usageWriter: FakeUsageWriter(),
+            scopeParser: MemoryQueryScopeParser(),
+            runtimeConfig: sampleRuntimeConfig()
+        )
+
+        let result = await useCase.execute(
+            request: MemoryQueryRequest(
+                question: "status",
+                outputFormat: .text,
+                options: MemoryQueryOptions(
+                    sources: [.bm25Store],
+                    scopeOverride: nil,
+                    maxResults: 5,
+                    timeoutSeconds: 10,
+                    allowFallbacks: false
+                )
+            )
+        )
+
+        XCTAssertTrue(result.answer.contains("retrieved evidence but could not synthesize a final answer"))
+        XCTAssertTrue(result.insufficientEvidence)
+        XCTAssertEqual(result.bm25StoreCount, 1)
+        XCTAssertTrue(result.keyPoints.isEmpty)
+    }
+
     func testUseCaseHonorsSourceFilterAndMaxResults() async {
         let semantic = FakeSemanticRetriever(hits: [
             sampleHit(id: "s1", source: .mem0Semantic, text: "Semantic one", score: 0.9),
@@ -142,7 +217,8 @@ final class MemoryQueryUseCaseTests: XCTestCase {
                     sources: [.bm25Store],
                     scopeOverride: nil,
                     maxResults: 2,
-                    timeoutSeconds: 8
+                    timeoutSeconds: 8,
+                    allowFallbacks: true
                 )
             )
         )
@@ -153,6 +229,98 @@ final class MemoryQueryUseCaseTests: XCTestCase {
         XCTAssertEqual(result.supportingEvents.count, 2)
         let semanticTimeoutCount = await semantic.timeoutCount()
         XCTAssertEqual(semanticTimeoutCount, 0)
+    }
+
+    func testUseCaseCanRunWithoutPlannerOrAnswerStageCaps() async {
+        let planner = FakePlanner(
+            result: MemoryQueryPlanResult(
+                plan: MemoryQueryPlan(
+                    queries: ["manychat status"],
+                    scope: MemoryQueryScope(start: nil, end: nil, label: "this week")
+                ),
+                usage: nil
+            )
+        )
+        let answerer = FakeAnswerer(
+            result: MemoryQueryAnswerResult(
+                payload: MemoryQueryAnswerPayload(
+                    answer: "Answered without stage caps.",
+                    keyPoints: [],
+                    supportingEvents: [],
+                    insufficientEvidence: false
+                ),
+                usage: nil
+            )
+        )
+        let useCase = MemoryQueryUseCase(
+            semanticRetriever: FakeSemanticRetriever(hits: []),
+            lexicalRetriever: FakeLexicalRetriever(hits: [
+                sampleHit(id: "b1", source: .bm25Store, text: "ManyChat work item", score: 0.9)
+            ]),
+            planner: planner,
+            answerer: answerer,
+            usageWriter: FakeUsageWriter(),
+            scopeParser: MemoryQueryScopeParser(),
+            runtimeConfig: MemoryQueryRuntimeConfig(
+                timeoutSeconds: nil,
+                plannerTimeoutSeconds: nil,
+                answerTimeoutSeconds: nil,
+                semanticSearchTimeoutSeconds: 5
+            )
+        )
+
+        let result = await useCase.execute(
+            request: MemoryQueryRequest(question: "ManyChat status", outputFormat: .text)
+        )
+
+        XCTAssertEqual(result.answer, "Answered without stage caps.")
+        let plannerTimeout = await planner.lastTimeoutSeconds()
+        let answererTimeout = await answerer.lastTimeoutSeconds()
+        XCTAssertNil(plannerTimeout)
+        XCTAssertNil(answererTimeout)
+    }
+
+    func testUseCaseBoundsLargeAnswerPayload() async {
+        let lexical = FakeLexicalRetriever(hits: [
+            sampleHit(id: "b1", source: .bm25Store, text: "ManyChat work item", score: 0.9)
+        ])
+        let planner = FakePlanner(
+            result: MemoryQueryPlanResult(
+                plan: MemoryQueryPlan(
+                    queries: ["manychat status"],
+                    scope: MemoryQueryScope(start: nil, end: nil, label: "this week")
+                ),
+                usage: nil
+            )
+        )
+        let oversizedText = Array(repeating: "grounded evidence", count: 4_500).joined(separator: " ")
+        let answerer = FakeAnswerer(
+            result: MemoryQueryAnswerResult(
+                payload: MemoryQueryAnswerPayload(
+                    answer: oversizedText,
+                    keyPoints: Array(repeating: oversizedText, count: 6),
+                    supportingEvents: Array(repeating: oversizedText, count: 12),
+                    insufficientEvidence: false
+                ),
+                usage: nil
+            )
+        )
+        let useCase = MemoryQueryUseCase(
+            semanticRetriever: FakeSemanticRetriever(hits: []),
+            lexicalRetriever: lexical,
+            planner: planner,
+            answerer: answerer,
+            usageWriter: FakeUsageWriter(),
+            scopeParser: MemoryQueryScopeParser(),
+            runtimeConfig: sampleRuntimeConfig()
+        )
+
+        let result = await useCase.execute(
+            request: MemoryQueryRequest(question: "ManyChat status", outputFormat: .text)
+        )
+
+        let aggregate = ([result.answer] + result.keyPoints + result.supportingEvents).joined(separator: "\n")
+        XCTAssertLessThanOrEqual(Int(ceil(Double(aggregate.count) / 4.0)), 2_000)
     }
 
     func testFallbackTranscriptAnswerMentionsMissingVerbatimTranscript() async {
@@ -183,7 +351,8 @@ final class MemoryQueryUseCaseTests: XCTestCase {
                     sources: [.bm25Store],
                     scopeOverride: nil,
                     maxResults: 3,
-                    timeoutSeconds: 10
+                    timeoutSeconds: 10,
+                    allowFallbacks: true
                 )
             )
         )
@@ -220,7 +389,8 @@ final class MemoryQueryUseCaseTests: XCTestCase {
                     sources: [.mem0Semantic],
                     scopeOverride: nil,
                     maxResults: 1,
-                    timeoutSeconds: 10
+                    timeoutSeconds: 10,
+                    allowFallbacks: true
                 )
             )
         )
@@ -232,6 +402,87 @@ final class MemoryQueryUseCaseTests: XCTestCase {
         XCTAssertEqual(plannerTimeout ?? 0, 4, accuracy: 0.25)
         XCTAssertEqual(semanticTimeout ?? 0, 5, accuracy: 0.25)
         XCTAssertNil(answererTimeout)
+    }
+
+    func testUseCaseEnablesFullContextModeForScopedTranscriptCorpus() async {
+        let transcriptHits = [
+            MemoryEvidenceHit(
+                id: "chunk-1",
+                source: .bm25Store,
+                text: "Transcript excerpt: Candidate explained GraphRAG trade-offs and when to use a vector database versus graph traversal.",
+                appName: "zoom.us",
+                project: "AI Core Team",
+                occurredAt: date(year: 2026, month: 3, day: 16, hour: 13),
+                metadata: [
+                    "retrieval_unit": "transcript_chunk",
+                    "artifact_kind": ArtifactKind.audio.rawValue,
+                    "has_transcript": "true"
+                ],
+                semanticScore: 0,
+                lexicalScore: 0.92,
+                hybridScore: 1.35
+            ),
+            MemoryEvidenceHit(
+                id: "chunk-2",
+                source: .bm25Store,
+                text: "Transcript excerpt: Candidate discussed NDCG, LLM-based evaluation, and monitoring production retrieval quality with Grafana.",
+                appName: "zoom.us",
+                project: "AI Core Team",
+                occurredAt: date(year: 2026, month: 3, day: 16, hour: 14),
+                metadata: [
+                    "retrieval_unit": "transcript_chunk",
+                    "artifact_kind": ArtifactKind.audio.rawValue,
+                    "has_transcript": "true"
+                ],
+                semanticScore: 0,
+                lexicalScore: 0.88,
+                hybridScore: 1.29
+            )
+        ]
+        let answerer = FakeAnswerer(
+            result: MemoryQueryAnswerResult(
+                payload: MemoryQueryAnswerPayload(
+                    answer: "Full-context answer.",
+                    keyPoints: [],
+                    supportingEvents: [],
+                    insufficientEvidence: false
+                ),
+                usage: nil
+            )
+        )
+        let referenceDate = date(year: 2026, month: 3, day: 18, hour: 9)
+        let useCase = MemoryQueryUseCase(
+            semanticRetriever: FakeSemanticRetriever(hits: []),
+            lexicalRetriever: FakeLexicalRetriever(hits: transcriptHits),
+            planner: FakePlanner(result: nil),
+            answerer: answerer,
+            usageWriter: FakeUsageWriter(),
+            scopeParser: MemoryQueryScopeParser(calendar: fixedCalendar),
+            runtimeConfig: sampleRuntimeConfig(),
+            calendar: fixedCalendar,
+            referenceDateProvider: { referenceDate }
+        )
+
+        _ = await useCase.execute(
+            request: MemoryQueryRequest(
+                question: "How well did the ML engineer candidate from the zoom interview on 2026-03-16 match an intermediate level based on the transcript?",
+                outputFormat: .text,
+                options: MemoryQueryOptions(
+                    sources: [.bm25Store],
+                    scopeOverride: MemoryQueryScope(
+                        start: date(year: 2026, month: 3, day: 16, hour: 0),
+                        end: date(year: 2026, month: 3, day: 17, hour: 0),
+                        label: "2026-03-16"
+                    ),
+                    maxResults: 6,
+                    timeoutSeconds: 12,
+                    allowFallbacks: true
+                )
+            )
+        )
+
+        let fullContextMode = await answerer.lastFullContextMode()
+        XCTAssertEqual(fullContextMode, true)
     }
 
     func testUseCaseFallsBackToHeuristicPlannerQueries() async {
@@ -255,7 +506,8 @@ final class MemoryQueryUseCaseTests: XCTestCase {
                     sources: [.mem0Semantic],
                     scopeOverride: nil,
                     maxResults: 3,
-                    timeoutSeconds: 10
+                    timeoutSeconds: 10,
+                    allowFallbacks: true
                 )
             )
         )
@@ -402,7 +654,8 @@ final class MemoryQueryUseCaseTests: XCTestCase {
                     sources: [.bm25Store],
                     scopeOverride: nil,
                     maxResults: 3,
-                    timeoutSeconds: 10
+                    timeoutSeconds: 10,
+                    allowFallbacks: true
                 )
             )
         )
@@ -494,7 +747,8 @@ final class MemoryQueryUseCaseTests: XCTestCase {
                     sources: [.bm25Store],
                     scopeOverride: nil,
                     maxResults: 6,
-                    timeoutSeconds: 10
+                    timeoutSeconds: 10,
+                    allowFallbacks: true
                 )
             )
         )
@@ -647,7 +901,7 @@ private final class FakePlanner: MemoryQueryPlanning, @unchecked Sendable {
         now: Date,
         detailLevel: MemoryQueryDetailLevel,
         timeZone: TimeZone,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval?
     ) async -> MemoryQueryPlanResult? {
         await recorder.record(timeoutSeconds)
         return result
@@ -661,6 +915,7 @@ private final class FakePlanner: MemoryQueryPlanning, @unchecked Sendable {
 private final class FakeAnswerer: MemoryQueryAnswering, @unchecked Sendable {
     private let result: MemoryQueryAnswerResult?
     private let recorder = TimeoutRecorder()
+    private let fullContextRecorder = BoolRecorder()
 
     init(result: MemoryQueryAnswerResult?) {
         self.result = result
@@ -670,18 +925,24 @@ private final class FakeAnswerer: MemoryQueryAnswering, @unchecked Sendable {
         question: String,
         scope: MemoryQueryScope,
         detailLevel: MemoryQueryDetailLevel,
+        fullContextMode: Bool,
         now: Date,
         timeZone: TimeZone,
         mem0Evidence: [MemoryEvidenceHit],
         bm25Evidence: [MemoryEvidenceHit],
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval?
     ) async -> MemoryQueryAnswerResult? {
         await recorder.record(timeoutSeconds)
+        await fullContextRecorder.record(fullContextMode)
         return result
     }
 
     func lastTimeoutSeconds() async -> TimeInterval? {
         await recorder.lastValue()
+    }
+
+    func lastFullContextMode() async -> Bool? {
+        await fullContextRecorder.lastValue()
     }
 }
 
@@ -730,5 +991,17 @@ private actor QueryRecorder {
 
     func allValues() -> [[String]] {
         values
+    }
+}
+
+private actor BoolRecorder {
+    private var values: [Bool] = []
+
+    func record(_ value: Bool) {
+        values.append(value)
+    }
+
+    func lastValue() -> Bool? {
+        values.last
     }
 }

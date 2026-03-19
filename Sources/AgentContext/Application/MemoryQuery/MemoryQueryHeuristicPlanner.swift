@@ -5,6 +5,7 @@ struct QueryIntentProfile: Sendable {
     let prefersDetailedAnswer: Bool
     let requestedDimensions: [String]
     let seeksEvaluation: Bool
+    let seeksWorkSummary: Bool
     let focusTerms: [String]
 }
 
@@ -25,6 +26,7 @@ struct MemoryQueryHeuristicPlanner: Sendable {
             prefersDetailedAnswer: analysis.prefersDetailedAnswer,
             requestedDimensions: analysis.requestedDimensions,
             seeksEvaluation: analysis.seeksEvaluation,
+            seeksWorkSummary: analysis.seeksWorkSummary,
             focusTerms: analysis.focusTerms
         )
     }
