@@ -6,6 +6,7 @@ actor SQLiteStore {
     private var db: OpaquePointer?
     private let jsonEncoder = JSONEncoder()
     private let jsonDecoder = JSONDecoder()
+    private let rowDecoder = SQLiteStoreRowDecoder()
 
     init(databaseURL: URL) throws {
         self.databaseURL = databaseURL
@@ -29,278 +30,7 @@ actor SQLiteStore {
     }
 
     private static func migrate(db: OpaquePointer?) throws {
-        let statements = [
-            "PRAGMA journal_mode=WAL;",
-            "PRAGMA synchronous=NORMAL;",
-            """
-            CREATE TABLE IF NOT EXISTS intervals (
-                id TEXT PRIMARY KEY,
-                start_time REAL NOT NULL,
-                end_time REAL NOT NULL,
-                app_name TEXT NOT NULL,
-                bundle_id TEXT,
-                pid INTEGER NOT NULL,
-                window_title TEXT,
-                document_path TEXT,
-                window_url TEXT,
-                workspace TEXT,
-                project TEXT
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_intervals_time ON intervals(start_time, end_time);",
-            """
-            CREATE TABLE IF NOT EXISTS evidence (
-                id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                artifact_path TEXT NOT NULL,
-                captured_at REAL NOT NULL,
-                app_name TEXT NOT NULL,
-                bundle_id TEXT,
-                pid INTEGER NOT NULL,
-                window_title TEXT,
-                document_path TEXT,
-                window_url TEXT,
-                workspace TEXT,
-                project TEXT,
-                interval_id TEXT,
-                capture_reason TEXT,
-                sequence_in_interval INTEGER,
-                analysis_json TEXT,
-                llm_model TEXT,
-                llm_input_tokens INTEGER DEFAULT 0,
-                llm_output_tokens INTEGER DEFAULT 0,
-                llm_audio_tokens INTEGER DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'pending',
-                error_message TEXT,
-                FOREIGN KEY(interval_id) REFERENCES intervals(id)
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_evidence_captured_at ON evidence(captured_at);",
-            """
-            CREATE TABLE IF NOT EXISTS artifact_perceptions (
-                evidence_id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                artifact_path TEXT NOT NULL,
-                captured_at REAL NOT NULL,
-                app_name TEXT NOT NULL,
-                bundle_id TEXT,
-                pid INTEGER NOT NULL,
-                window_title TEXT,
-                document_path TEXT,
-                window_url TEXT,
-                workspace TEXT,
-                project TEXT,
-                interval_id TEXT,
-                capture_reason TEXT,
-                sequence_in_interval INTEGER,
-                analysis_json TEXT NOT NULL,
-                llm_model TEXT,
-                llm_input_tokens INTEGER DEFAULT 0,
-                llm_output_tokens INTEGER DEFAULT 0,
-                llm_audio_tokens INTEGER DEFAULT 0,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_artifact_perceptions_captured_at ON artifact_perceptions(captured_at);",
-            "CREATE INDEX IF NOT EXISTS idx_artifact_perceptions_app_project ON artifact_perceptions(app_name, project);",
-            """
-            INSERT OR IGNORE INTO artifact_perceptions(
-                evidence_id, kind, artifact_path, captured_at, app_name, bundle_id, pid,
-                window_title, document_path, window_url, workspace, project,
-                interval_id, capture_reason, sequence_in_interval, analysis_json,
-                llm_model, llm_input_tokens, llm_output_tokens, llm_audio_tokens,
-                created_at, updated_at
-            )
-            SELECT id, kind, artifact_path, captured_at, app_name, bundle_id, pid,
-                   window_title, document_path, window_url, workspace, project,
-                   interval_id, capture_reason, sequence_in_interval, analysis_json,
-                   llm_model, llm_input_tokens, llm_output_tokens, llm_audio_tokens,
-                   captured_at, captured_at
-              FROM evidence
-             WHERE analysis_json IS NOT NULL;
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS interval_summaries (
-                id TEXT PRIMARY KEY,
-                bucket_start REAL NOT NULL,
-                bucket_end REAL NOT NULL,
-                app_name TEXT NOT NULL,
-                bundle_id TEXT,
-                summary TEXT NOT NULL,
-                entities_json TEXT,
-                insufficient_evidence INTEGER NOT NULL,
-                llm_model TEXT,
-                llm_input_tokens INTEGER DEFAULT 0,
-                llm_output_tokens INTEGER DEFAULT 0,
-                llm_audio_tokens INTEGER DEFAULT 0,
-                finalized_at REAL NOT NULL
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_interval_summaries_bucket ON interval_summaries(bucket_start, bucket_end);",
-            """
-            CREATE TABLE IF NOT EXISTS hour_summaries (
-                id TEXT PRIMARY KEY,
-                hour_start REAL NOT NULL,
-                hour_end REAL NOT NULL,
-                summary TEXT NOT NULL,
-                llm_model TEXT,
-                llm_input_tokens INTEGER DEFAULT 0,
-                llm_output_tokens INTEGER DEFAULT 0,
-                llm_audio_tokens INTEGER DEFAULT 0,
-                finalized_at REAL NOT NULL
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_hour_summaries_hour ON hour_summaries(hour_start, hour_end);",
-            """
-            CREATE TABLE IF NOT EXISTS llm_usage_events (
-                id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                created_at REAL NOT NULL,
-                model TEXT NOT NULL,
-                input_tokens INTEGER NOT NULL,
-                output_tokens INTEGER NOT NULL,
-                audio_tokens INTEGER NOT NULL,
-                estimated_cost_usd REAL NOT NULL
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at ON llm_usage_events(created_at);",
-            """
-            CREATE TABLE IF NOT EXISTS mem0_memory (
-                id TEXT PRIMARY KEY,
-                occurred_at REAL NOT NULL,
-                scope TEXT NOT NULL,
-                app_name TEXT,
-                project TEXT,
-                summary TEXT NOT NULL,
-                entities_json TEXT,
-                payload_json TEXT NOT NULL,
-                mem0_status TEXT NOT NULL,
-                mem0_response_json TEXT,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_mem0_memory_occurred_at ON mem0_memory(occurred_at);",
-            """
-            CREATE TABLE IF NOT EXISTS task_segments (
-                id TEXT PRIMARY KEY,
-                scope TEXT NOT NULL,
-                start_time REAL NOT NULL,
-                end_time REAL NOT NULL,
-                occurred_at REAL NOT NULL,
-                app_name TEXT,
-                bundle_id TEXT,
-                project TEXT,
-                workspace TEXT,
-                repo TEXT,
-                document TEXT,
-                url TEXT,
-                task TEXT NOT NULL,
-                issue_or_goal TEXT,
-                actions_json TEXT NOT NULL,
-                outcome TEXT,
-                next_step TEXT,
-                people_json TEXT NOT NULL DEFAULT '[]',
-                blocker TEXT,
-                status TEXT NOT NULL,
-                confidence REAL NOT NULL,
-                evidence_refs_json TEXT NOT NULL,
-                evidence_excerpts_json TEXT NOT NULL DEFAULT '[]',
-                entities_json TEXT NOT NULL,
-                artifact_kinds_json TEXT NOT NULL DEFAULT '[]',
-                source_kinds_json TEXT NOT NULL DEFAULT '[]',
-                summary TEXT NOT NULL,
-                source_summary_id TEXT,
-                prompt_version TEXT NOT NULL,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_task_segments_time ON task_segments(occurred_at);",
-            "CREATE INDEX IF NOT EXISTS idx_task_segments_status ON task_segments(status);",
-            "CREATE INDEX IF NOT EXISTS idx_task_segments_app_project ON task_segments(app_name, project);",
-            """
-            CREATE TABLE IF NOT EXISTS transcript_units (
-                id TEXT PRIMARY KEY,
-                evidence_id TEXT NOT NULL,
-                occurred_at REAL NOT NULL,
-                app_name TEXT,
-                bundle_id TEXT,
-                project TEXT,
-                workspace TEXT,
-                task TEXT,
-                session_id TEXT,
-                unit_kind TEXT NOT NULL,
-                speaker_label TEXT,
-                summary TEXT NOT NULL,
-                excerpt_text TEXT NOT NULL,
-                topic_tags_json TEXT NOT NULL,
-                people_json TEXT NOT NULL,
-                entities_json TEXT NOT NULL,
-                source_evidence_refs_json TEXT NOT NULL,
-                source_excerpts_json TEXT NOT NULL,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_transcript_units_time ON transcript_units(occurred_at);",
-            "CREATE INDEX IF NOT EXISTS idx_transcript_units_session ON transcript_units(session_id);",
-            "CREATE INDEX IF NOT EXISTS idx_transcript_units_project ON transcript_units(project);",
-            "ALTER TABLE task_segments ADD COLUMN people_json TEXT NOT NULL DEFAULT '[]';",
-            "ALTER TABLE task_segments ADD COLUMN blocker TEXT;",
-            "ALTER TABLE task_segments ADD COLUMN evidence_excerpts_json TEXT NOT NULL DEFAULT '[]';",
-            "ALTER TABLE task_segments ADD COLUMN artifact_kinds_json TEXT NOT NULL DEFAULT '[]';",
-            "ALTER TABLE task_segments ADD COLUMN source_kinds_json TEXT NOT NULL DEFAULT '[]';",
-            """
-            CREATE TABLE IF NOT EXISTS finalized_interval_buckets (
-                bucket_start REAL PRIMARY KEY,
-                finalized_at REAL NOT NULL
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS finalized_hours (
-                hour_start REAL PRIMARY KEY,
-                finalized_at REAL NOT NULL
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS pending_interval_buckets (
-                bucket_start REAL PRIMARY KEY,
-                next_attempt_at REAL NOT NULL,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_pending_interval_due ON pending_interval_buckets(next_attempt_at);",
-            """
-            CREATE TABLE IF NOT EXISTS pending_hours (
-                hour_start REAL PRIMARY KEY,
-                next_attempt_at REAL NOT NULL,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS idx_pending_hours_due ON pending_hours(next_attempt_at);",
-            "CREATE INDEX IF NOT EXISTS idx_mem0_memory_status_updated ON mem0_memory(mem0_status, updated_at);"
-        ]
-
-        for sql in statements {
-            var errorPointer: UnsafeMutablePointer<Int8>?
-            let code = sqlite3_exec(db, sql, nil, nil, &errorPointer)
-            if code != SQLITE_OK {
-                let message = errorPointer.map { String(cString: $0) } ?? "SQLite migration error"
-                sqlite3_free(errorPointer)
-                if sql.contains("ALTER TABLE"), message.lowercased().contains("duplicate column name") {
-                    continue
-                }
-                throw NSError(domain: "SQLiteStore", code: Int(code), userInfo: [NSLocalizedDescriptionKey: message])
-            }
-        }
+        try SQLiteStoreSchema.migrate(db: db)
     }
 
     func insertInterval(_ interval: ActivityInterval) throws {
@@ -480,26 +210,9 @@ actor SQLiteStore {
         var output: [ArtifactMetadata] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             output.append(
-                ArtifactMetadata(
-                    id: string(statement, column: 0) ?? UUID().uuidString,
-                    kind: ArtifactKind(rawValue: string(statement, column: 1) ?? "screenshot") ?? .screenshot,
-                    path: string(statement, column: 2) ?? "",
-                    capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
-                    app: AppDescriptor(
-                        appName: string(statement, column: 4) ?? "Unknown",
-                        bundleID: string(statement, column: 5),
-                        pid: sqlite3_column_int(statement, 6)
-                    ),
-                    window: WindowContext(
-                        title: string(statement, column: 7),
-                        documentPath: string(statement, column: 8),
-                        url: string(statement, column: 9),
-                        workspace: string(statement, column: 10),
-                        project: string(statement, column: 11)
-                    ),
-                    intervalID: string(statement, column: 12),
-                    captureReason: string(statement, column: 13) ?? "unknown",
-                    sequenceInInterval: Int(sqlite3_column_int(statement, 14))
+                rowDecoder.decodeArtifactMetadata(
+                    from: statement,
+                    string: { [self] statement, column in string(statement, column: column) }
                 )
             )
         }
@@ -528,32 +241,7 @@ actor SQLiteStore {
             let appName = string(statement, column: 3) ?? "Unknown"
             let analysis = parseAnalysisJSON(string(statement, column: 4))
 
-            output.append(
-                EvidenceDetailItem(
-                    id: id,
-                    timestamp: timestamp,
-                    kind: kind,
-                    appName: appName,
-                    description: analysis?.description ?? (analysis?.summary ?? "Pending analysis"),
-                    contentDescription: analysis?.contentDescription ?? (analysis?.description ?? analysis?.summary ?? "Pending analysis"),
-                    layoutDescription: analysis?.layoutDescription ?? (analysis?.contentDescription ?? analysis?.description ?? analysis?.summary ?? "Pending analysis"),
-                    problem: analysis?.problem,
-                    success: analysis?.success,
-                    userContribution: analysis?.userContribution,
-                    suggestionOrDecision: analysis?.suggestionOrDecision,
-                    status: analysis?.status ?? .none,
-                    confidence: analysis?.confidence ?? 0,
-                    summary: analysis?.summary ?? "Pending analysis",
-                    transcript: analysis?.transcript,
-                    salientText: analysis?.salientText ?? [],
-                    uiElements: analysis?.uiElements ?? [],
-                    entities: analysis?.entities ?? [],
-                    project: analysis?.project,
-                    workspace: analysis?.workspace,
-                    task: analysis?.task,
-                    evidence: analysis?.evidence ?? []
-                )
-            )
+            output.append(rowDecoder.evidenceDetailItem(id: id, timestamp: timestamp, kind: kind, appName: appName, analysis: analysis))
         }
 
         return output
@@ -592,32 +280,7 @@ actor SQLiteStore {
             let appName = string(statement, column: 3) ?? "Unknown"
             let analysis = parseAnalysisJSON(string(statement, column: 4))
 
-            output.append(
-                EvidenceDetailItem(
-                    id: id,
-                    timestamp: timestamp,
-                    kind: kind,
-                    appName: appName,
-                    description: analysis?.description ?? (analysis?.summary ?? "Pending analysis"),
-                    contentDescription: analysis?.contentDescription ?? (analysis?.description ?? analysis?.summary ?? "Pending analysis"),
-                    layoutDescription: analysis?.layoutDescription ?? (analysis?.contentDescription ?? analysis?.description ?? analysis?.summary ?? "Pending analysis"),
-                    problem: analysis?.problem,
-                    success: analysis?.success,
-                    userContribution: analysis?.userContribution,
-                    suggestionOrDecision: analysis?.suggestionOrDecision,
-                    status: analysis?.status ?? .none,
-                    confidence: analysis?.confidence ?? 0,
-                    summary: analysis?.summary ?? "Pending analysis",
-                    transcript: analysis?.transcript,
-                    salientText: analysis?.salientText ?? [],
-                    uiElements: analysis?.uiElements ?? [],
-                    entities: analysis?.entities ?? [],
-                    project: analysis?.project,
-                    workspace: analysis?.workspace,
-                    task: analysis?.task,
-                    evidence: analysis?.evidence ?? []
-                )
-            )
+            output.append(rowDecoder.evidenceDetailItem(id: id, timestamp: timestamp, kind: kind, appName: appName, analysis: analysis))
         }
 
         return output
@@ -642,26 +305,10 @@ actor SQLiteStore {
             return nil
         }
 
-        return ArtifactMetadata(
-            id: string(statement, column: 0) ?? id,
-            kind: ArtifactKind(rawValue: string(statement, column: 1) ?? "screenshot") ?? .screenshot,
-            path: string(statement, column: 2) ?? "",
-            capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
-            app: AppDescriptor(
-                appName: string(statement, column: 4) ?? "Unknown",
-                bundleID: string(statement, column: 5),
-                pid: sqlite3_column_int(statement, 6)
-            ),
-            window: WindowContext(
-                title: string(statement, column: 7),
-                documentPath: string(statement, column: 8),
-                url: string(statement, column: 9),
-                workspace: string(statement, column: 10),
-                project: string(statement, column: 11)
-            ),
-            intervalID: string(statement, column: 12),
-            captureReason: string(statement, column: 13) ?? "unknown",
-            sequenceInInterval: Int(sqlite3_column_int(statement, 14))
+        return rowDecoder.decodeArtifactMetadata(
+            from: statement,
+            string: { [self] statement, column in string(statement, column: column) },
+            fallbackID: id
         )
     }
 
@@ -1825,180 +1472,67 @@ actor SQLiteStore {
     }
 
     private func execute(_ sql: String) throws {
-        var errorPointer: UnsafeMutablePointer<Int8>?
-        let code = sqlite3_exec(db, sql, nil, nil, &errorPointer)
-        guard code == SQLITE_OK else {
-            let message = errorPointer.map { String(cString: $0) } ?? "SQLite error"
-            sqlite3_free(errorPointer)
-            throw NSError(domain: "SQLiteStore", code: Int(code), userInfo: [NSLocalizedDescriptionKey: message])
-        }
+        try SQLiteStoreDatabaseSupport.execute(db: db, sql: sql)
     }
 
     private func prepare(_ sql: String, statement: inout OpaquePointer?) throws {
-        let code = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
-        guard code == SQLITE_OK else {
-            throw NSError(domain: "SQLiteStore", code: Int(code), userInfo: [NSLocalizedDescriptionKey: lastErrorMessage()])
-        }
+        try SQLiteStoreDatabaseSupport.prepare(db: db, sql: sql, statement: &statement)
     }
 
     private func step(_ statement: OpaquePointer?) throws {
-        let code = sqlite3_step(statement)
-        guard code == SQLITE_DONE || code == SQLITE_ROW else {
-            throw NSError(domain: "SQLiteStore", code: Int(code), userInfo: [NSLocalizedDescriptionKey: lastErrorMessage()])
-        }
+        try SQLiteStoreDatabaseSupport.step(db: db, statement: statement)
     }
 
     private func bindText(_ statement: OpaquePointer?, index: Int32, value: String) {
-        sqlite3_bind_text(statement, index, value, -1, SQLITE_TRANSIENT)
+        SQLiteStoreDatabaseSupport.bindText(statement, index: index, value: value)
     }
 
     private func bindOptionalText(_ statement: OpaquePointer?, index: Int32, value: String?) {
-        if let value {
-            bindText(statement, index: index, value: value)
-        } else {
-            sqlite3_bind_null(statement, index)
-        }
+        SQLiteStoreDatabaseSupport.bindOptionalText(statement, index: index, value: value)
     }
 
     private func string(_ statement: OpaquePointer?, column: Int32) -> String? {
-        guard let pointer = sqlite3_column_text(statement, column) else { return nil }
-        return String(cString: pointer)
+        SQLiteStoreDatabaseSupport.string(statement, column: column)
     }
 
     private func jsonString(from value: [String]) -> String {
-        String(
-            data: (try? jsonEncoder.encode(value)) ?? Data("[]".utf8),
-            encoding: .utf8
-        ) ?? "[]"
+        rowDecoder.jsonString(from: value, encoder: jsonEncoder)
     }
 
     private func decodeStringArray(_ json: String?) -> [String] {
-        guard
-            let json,
-            let data = json.data(using: .utf8),
-            let decoded = try? jsonDecoder.decode([String].self, from: data)
-        else {
-            return []
-        }
-        return decoded
+        rowDecoder.decodeStringArray(json, decoder: jsonDecoder)
     }
 
     private func decodeTaskSegments(from statement: OpaquePointer?) throws -> [TaskSegmentRecord] {
-        var rows: [TaskSegmentRecord] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            let statusRaw = string(statement, column: 19) ?? TaskSegmentStatus.unknown.rawValue
-            let status = TaskSegmentStatus(rawValue: statusRaw) ?? .unknown
-            let confidence = max(0, min(1, sqlite3_column_double(statement, 20)))
-            let actions = decodeStringArray(string(statement, column: 14))
-            let people = decodeStringArray(string(statement, column: 17))
-            let evidenceRefs = decodeStringArray(string(statement, column: 21))
-            let evidenceExcerpts = decodeStringArray(string(statement, column: 22))
-            let entities = decodeStringArray(string(statement, column: 23))
-            let artifactKinds = decodeStringArray(string(statement, column: 24)).compactMap(ArtifactKind.init(rawValue:))
-            let sourceKinds = decodeStringArray(string(statement, column: 25)).compactMap(PromotedSourceKind.init(rawValue:))
-
-            rows.append(
-                TaskSegmentRecord(
-                    id: string(statement, column: 0) ?? UUID().uuidString,
-                    scope: string(statement, column: 1) ?? "interval",
-                    startTime: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
-                    endTime: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
-                    occurredAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4)),
-                    appName: string(statement, column: 5),
-                    bundleID: string(statement, column: 6),
-                    project: string(statement, column: 7),
-                    workspace: string(statement, column: 8),
-                    repo: string(statement, column: 9),
-                    document: string(statement, column: 10),
-                    url: string(statement, column: 11),
-                    task: string(statement, column: 12) ?? "unknown task",
-                    issueOrGoal: string(statement, column: 13),
-                    actions: actions,
-                    outcome: string(statement, column: 15),
-                    nextStep: string(statement, column: 16),
-                    people: people,
-                    blocker: string(statement, column: 18),
-                    status: status,
-                    confidence: confidence,
-                    evidenceRefs: evidenceRefs,
-                    evidenceExcerpts: evidenceExcerpts,
-                    entities: entities,
-                    artifactKinds: artifactKinds,
-                    sourceKinds: sourceKinds,
-                    summary: string(statement, column: 26) ?? "",
-                    sourceSummaryID: string(statement, column: 27),
-                    promptVersion: string(statement, column: 28) ?? "v1"
-                )
-            )
-        }
-        return rows
+        rowDecoder.decodeTaskSegments(
+            from: statement,
+            string: { [self] statement, column in string(statement, column: column) },
+            decoder: jsonDecoder
+        )
     }
 
     private func decodeTranscriptUnits(from statement: OpaquePointer?) throws -> [TranscriptUnitRecord] {
-        var rows: [TranscriptUnitRecord] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            rows.append(
-                TranscriptUnitRecord(
-                    id: string(statement, column: 0) ?? UUID().uuidString,
-                    evidenceID: string(statement, column: 1) ?? "",
-                    occurredAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
-                    appName: string(statement, column: 3),
-                    bundleID: string(statement, column: 4),
-                    project: string(statement, column: 5),
-                    workspace: string(statement, column: 6),
-                    task: string(statement, column: 7),
-                    sessionID: string(statement, column: 8),
-                    kind: TranscriptUnitKind(rawValue: string(statement, column: 9) ?? TranscriptUnitKind.transcriptExcerpt.rawValue) ?? .transcriptExcerpt,
-                    speakerLabel: string(statement, column: 10),
-                    summary: string(statement, column: 11) ?? "",
-                    excerptText: string(statement, column: 12) ?? "",
-                    topicTags: decodeStringArray(string(statement, column: 13)),
-                    people: decodeStringArray(string(statement, column: 14)),
-                    entities: decodeStringArray(string(statement, column: 15)),
-                    sourceEvidenceRefs: decodeStringArray(string(statement, column: 16)),
-                    sourceExcerpts: decodeStringArray(string(statement, column: 17))
-                )
-            )
-        }
-        return rows
+        rowDecoder.decodeTranscriptUnits(
+            from: statement,
+            string: { [self] statement, column in string(statement, column: column) },
+            decoder: jsonDecoder
+        )
     }
 
     private func decodeStoredEvidenceRecord(
         from statement: OpaquePointer?,
         fallbackAppName: String?
     ) -> StoredEvidenceRecord {
-        let id = string(statement, column: 0) ?? UUID().uuidString
-        let kind = ArtifactKind(rawValue: string(statement, column: 1) ?? "screenshot") ?? .screenshot
-        let analysis = parseAnalysisJSON(string(statement, column: 15))
-        let metadata = ArtifactMetadata(
-            id: id,
-            kind: kind,
-            path: string(statement, column: 2) ?? "",
-            capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
-            app: AppDescriptor(
-                appName: string(statement, column: 4) ?? fallbackAppName ?? "Unknown",
-                bundleID: string(statement, column: 5),
-                pid: sqlite3_column_int(statement, 6)
-            ),
-            window: WindowContext(
-                title: string(statement, column: 7),
-                documentPath: string(statement, column: 8),
-                url: string(statement, column: 9),
-                workspace: string(statement, column: 10),
-                project: string(statement, column: 11)
-            ),
-            intervalID: string(statement, column: 12),
-            captureReason: string(statement, column: 13) ?? "unknown",
-            sequenceInInterval: Int(sqlite3_column_int(statement, 14))
+        rowDecoder.decodeStoredEvidenceRecord(
+            from: statement,
+            fallbackAppName: fallbackAppName,
+            string: { [self] statement, column in string(statement, column: column) },
+            decoder: jsonDecoder
         )
-        return StoredEvidenceRecord(metadata: metadata, analysis: analysis)
     }
 
     private func parseAnalysisJSON(_ analysisJSON: String?) -> ArtifactAnalysis? {
-        guard let analysisJSON, let data = analysisJSON.data(using: .utf8) else {
-            return nil
-        }
-        return try? jsonDecoder.decode(ArtifactAnalysis.self, from: data)
+        rowDecoder.parseAnalysisJSON(analysisJSON, decoder: jsonDecoder)
     }
 
     private func listEvidencePurgeCandidates(
@@ -2036,9 +1570,7 @@ actor SQLiteStore {
     }
 
     private func lastErrorMessage() -> String {
-        guard let db else { return "SQLite database unavailable" }
-        guard let message = sqlite3_errmsg(db) else { return "Unknown SQLite error" }
-        return String(cString: message)
+        SQLiteStoreDatabaseSupport.lastErrorMessage(db: db)
     }
 }
 
@@ -2046,5 +1578,3 @@ private struct EvidencePurgeCandidate: Sendable {
     let id: String
     let path: String
 }
-
-private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
