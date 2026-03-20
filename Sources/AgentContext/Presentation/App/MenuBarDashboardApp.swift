@@ -250,6 +250,8 @@ struct OpenRouterModelOption: Identifiable, Hashable, Sendable {
 
 @MainActor
 final class ActivityDashboardStore: ObservableObject {
+    private let usageSupport = DashboardUsageSupport()
+    private let modelSupport = DashboardOpenRouterModelSupport()
     @Published var isRecording = false
     @Published var isTranscriptRunning = false
     @Published var transcriptElapsedText = ""
@@ -537,10 +539,11 @@ final class ActivityDashboardStore: ObservableObject {
         let env = runtime.config.environment
         let settings = settingsDraft
         let apiKey = AppSettingsStore.resolvedOpenRouterKey(settings: settings, env: env)
+        let modelSupport = modelSupport
 
         Task { [weak self] in
             do {
-                let models = try await Self.fetchOpenRouterModels(
+                let models = try await modelSupport.fetchOpenRouterModels(
                     endpoint: endpoint,
                     apiKey: apiKey,
                     appNameHeader: settings.openRouterAppNameHeader,
@@ -632,7 +635,7 @@ final class ActivityDashboardStore: ObservableObject {
         let targetDay = selectedDay
         Task {
             do {
-                let weekDays = weekDaysContaining(targetDay)
+                let weekDays = usageSupport.weekDaysContaining(targetDay)
                 var items: [DashboardWeekdayUsage] = []
                 for day in weekDays {
                     let duration = try await runtime.dayUsageTotal(day: day)
@@ -658,60 +661,15 @@ final class ActivityDashboardStore: ObservableObject {
     }
 
     private func weekDaysContaining(_ day: Date) -> [Date] {
-        var calendar = Calendar.autoupdatingCurrent
-        calendar.firstWeekday = 2
-        let startOfDay = calendar.startOfDay(for: day)
-        let weekday = calendar.component(.weekday, from: startOfDay)
-        let offset = (weekday + 5) % 7
-        guard let weekStart = calendar.date(byAdding: .day, value: -offset, to: startOfDay) else {
-            return [startOfDay]
-        }
-
-        return (0..<7).compactMap { index in
-            calendar.date(byAdding: .day, value: index, to: weekStart)
-        }
+        usageSupport.weekDaysContaining(day)
     }
 
     private func aggregateHourlyUsage(from rows: [DashboardHourRow]) -> [DashboardHourUsage] {
-        rows.sorted { $0.hour < $1.hour }.map { row in
-            let total = row.blocks.reduce(0) { $0 + $1.duration }
-            return DashboardHourUsage(id: row.hour, hour: row.hour, duration: total)
-        }
+        usageSupport.aggregateHourlyUsage(from: rows)
     }
 
     private func aggregateDayAppRows(from rows: [DashboardHourRow]) -> [DashboardDayAppRow] {
-        var grouped: [String: DashboardDayAppRow] = [:]
-
-        for row in rows {
-            for block in row.blocks {
-                let key = block.bundleID ?? block.appName
-                if var existing = grouped[key] {
-                    existing = DashboardDayAppRow(
-                        id: existing.id,
-                        appName: existing.appName,
-                        bundleID: existing.bundleID,
-                        duration: existing.duration + block.duration,
-                        icon: existing.icon
-                    )
-                    grouped[key] = existing
-                } else {
-                    grouped[key] = DashboardDayAppRow(
-                        id: key,
-                        appName: block.appName,
-                        bundleID: block.bundleID,
-                        duration: block.duration,
-                        icon: block.icon
-                    )
-                }
-            }
-        }
-
-        return grouped.values.sorted { lhs, rhs in
-            if abs(lhs.duration - rhs.duration) > 0.1 {
-                return lhs.duration > rhs.duration
-            }
-            return lhs.appName.localizedCaseInsensitiveCompare(rhs.appName) == .orderedAscending
-        }
+        usageSupport.aggregateDayAppRows(from: rows)
     }
 
     private func updateWeekUsageSelectedDay(total: TimeInterval) {
@@ -728,9 +686,7 @@ final class ActivityDashboardStore: ObservableObject {
     }
 
     private func totalDuration(from rows: [DashboardHourRow]) -> TimeInterval {
-        rows.reduce(0) { accumulator, row in
-            accumulator + row.blocks.reduce(0) { $0 + $1.duration }
-        }
+        usageSupport.totalDuration(from: rows)
     }
 
     private func selectedRows(from rows: [DashboardHourRow]) -> [DashboardHourRow] {
@@ -825,162 +781,15 @@ final class ActivityDashboardStore: ObservableObject {
     }
 
     private func elapsedText(from start: Date) -> String {
-        let seconds = max(0, Int(Date().timeIntervalSince(start)))
-        let minutes = seconds / 60
-        let remainder = seconds % 60
-        return String(format: "%02d:%02d", minutes, remainder)
+        usageSupport.elapsedText(from: start)
     }
 
     private func withSelectedModels(_ models: [OpenRouterModelOption]) -> [OpenRouterModelOption] {
-        var byID = [String: OpenRouterModelOption]()
-        for model in models {
-            byID[model.id] = model
-        }
-
-        for selected in selectedModelIDs() {
-            if byID[selected] == nil {
-                byID[selected] = OpenRouterModelOption(id: selected, name: nil, inputModalities: [])
-            }
-        }
-
-        return byID.values.sorted { lhs, rhs in
-            lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
-        }
+        modelSupport.withSelectedModels(models, selectedIDs: selectedModelIDs())
     }
 
     private func selectedModelIDs() -> [String] {
-        var seen = Set<String>()
-        var output: [String] = []
-        let candidates = [
-            AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterModel),
-            AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterAudioModel),
-            AppSettings.normalizedOpenRouterModel(settingsDraft.openRouterTextModel)
-        ]
-        for candidate in candidates {
-            guard seen.insert(candidate).inserted else { continue }
-            output.append(candidate)
-        }
-        return output
-    }
-
-    private static func fetchOpenRouterModels(
-        endpoint: URL,
-        apiKey: String?,
-        appNameHeader: String?,
-        refererHeader: String?
-    ) async throws -> [OpenRouterModelOption] {
-        let modelsURL = modelsURL(from: endpoint)
-        var request = URLRequest(url: modelsURL)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 20
-        if let apiKey, !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
-        if let appNameHeader, !appNameHeader.isEmpty {
-            request.setValue(appNameHeader, forHTTPHeaderField: "X-Title")
-        }
-        if let refererHeader, !refererHeader.isEmpty {
-            request.setValue(refererHeader, forHTTPHeaderField: "HTTP-Referer")
-        }
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 500
-        guard statusCode < 400 else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw NSError(
-                domain: "OpenRouterModels",
-                code: statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "Model list request failed (\(statusCode)): \(body)"]
-            )
-        }
-
-        let decoded = try JSONDecoder().decode(OpenRouterModelListResponse.self, from: data)
-        let options = decoded.data.compactMap { model -> OpenRouterModelOption? in
-            guard let modelID = model.id.nilIfEmpty else { return nil }
-            let modalities = normalizedInputModalities(from: model.architecture)
-            return OpenRouterModelOption(
-                id: modelID,
-                name: model.name?.nilIfEmpty,
-                inputModalities: Array(modalities)
-            )
-        }
-        if options.isEmpty {
-            throw NSError(
-                domain: "OpenRouterModels",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "No models returned from \(modelsURL.absoluteString)."]
-            )
-        }
-
-        return options.sorted { lhs, rhs in
-            lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
-        }
-    }
-
-    private static func normalizedInputModalities(from architecture: OpenRouterModelArchitecture?) -> Set<String> {
-        var output = Set<String>()
-        for modality in architecture?.inputModalities ?? [] {
-            if let normalized = modality.nilIfEmpty?.lowercased() {
-                output.insert(normalized)
-            }
-        }
-
-        if output.isEmpty, let modality = architecture?.modality?.lowercased() {
-            let inputPart = modality.components(separatedBy: "->").first ?? modality
-            let components = inputPart
-                .split(separator: "+")
-                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            for component in components where !component.isEmpty {
-                output.insert(component)
-            }
-        }
-
-        return output
-    }
-
-    private static func modelsURL(from endpoint: URL) -> URL {
-        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
-            return endpoint
-        }
-
-        var path = components.path
-        if path.hasSuffix("/chat/completions") {
-            path.removeLast("/chat/completions".count)
-        } else if path.hasSuffix("/completions") {
-            path.removeLast("/completions".count)
-        } else if path.hasSuffix("/") {
-            path.removeLast()
-        } else if let slash = path.lastIndex(of: "/"), slash > path.startIndex {
-            path = String(path[..<slash])
-        } else {
-            path = ""
-        }
-
-        let normalizedPrefix = path.hasSuffix("/") ? path : path + "/"
-        components.path = normalizedPrefix + "models"
-        components.queryItems = [URLQueryItem(name: "output_modality", value: "all")]
-        components.fragment = nil
-        return components.url ?? endpoint
-    }
-
-    private struct OpenRouterModelListResponse: Decodable {
-        let data: [OpenRouterModel]
-    }
-
-    private struct OpenRouterModel: Decodable {
-        let id: String
-        let name: String?
-        let architecture: OpenRouterModelArchitecture?
-    }
-
-    private struct OpenRouterModelArchitecture: Decodable {
-        let modality: String?
-        let inputModalities: [String]?
-
-        private enum CodingKeys: String, CodingKey {
-            case modality
-            case inputModalities = "input_modalities"
-        }
+        modelSupport.selectedModelIDs(from: settingsDraft)
     }
 }
 
