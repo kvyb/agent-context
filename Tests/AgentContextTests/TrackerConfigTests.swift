@@ -38,12 +38,31 @@ final class TrackerConfigTests: XCTestCase {
         withEnvironmentUnset([
             "AGENT_CONTEXT_OPENROUTER_ENDPOINT",
             "AGENT_CONTEXT_OPENROUTER_MODEL",
+            "AGENT_CONTEXT_OPENROUTER_QUERY_AGENT_MODEL",
+            "AGENT_CONTEXT_OPENROUTER_EVALUATION_MODEL",
+            "AGENT_CONTEXT_OPENROUTER_QUERY_AGENT_REASONING_EFFORT",
             "AGENT_CONTEXT_OPENROUTER_REASONING_EFFORT"
         ]) {
             let config = TrackerConfig.fromEnvironment()
             XCTAssertEqual(config.openRouter.endpoint.absoluteString, "https://openrouter.ai/api/v1/chat/completions")
             XCTAssertEqual(config.openRouter.model, "google/gemini-3.1-flash-lite-preview")
+            XCTAssertEqual(config.openRouter.queryAgentModel, "openai/gpt-5.4-mini")
+            XCTAssertEqual(config.openRouter.evaluationModel, "google/gemini-3.1-flash-lite-preview")
             XCTAssertEqual(config.openRouter.reasoningEffort, "medium")
+            XCTAssertNil(config.openRouter.queryAgentReasoningEffort)
+        }
+    }
+
+    func testOpenRouterQueryAndEvaluationOverrides() {
+        withEnvironment([
+            "AGENT_CONTEXT_OPENROUTER_QUERY_AGENT_MODEL": "openai/gpt-5.4-mini",
+            "AGENT_CONTEXT_OPENROUTER_EVALUATION_MODEL": "google/gemini-3.1-flash-lite-preview",
+            "AGENT_CONTEXT_OPENROUTER_QUERY_AGENT_REASONING_EFFORT": "low"
+        ]) {
+            let config = TrackerConfig.fromEnvironment()
+            XCTAssertEqual(config.openRouter.queryAgentModel, "openai/gpt-5.4-mini")
+            XCTAssertEqual(config.openRouter.evaluationModel, "google/gemini-3.1-flash-lite-preview")
+            XCTAssertEqual(config.openRouter.queryAgentReasoningEffort, "low")
         }
     }
 

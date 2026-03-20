@@ -42,6 +42,7 @@ final class OpenRouterClient: @unchecked Sendable {
     private let queryAgentModel: String
     private let evaluationModel: String
     private let reasoningEffort: String
+    private let queryAgentReasoningEffort: String?
     private let timeoutSeconds: TimeInterval
     private let appNameHeader: String?
     private let refererHeader: String?
@@ -52,9 +53,10 @@ final class OpenRouterClient: @unchecked Sendable {
         multimodalModel = AppSettings.normalizedOpenRouterModel(settings.openRouterModel.nilIfEmpty ?? config.model)
         audioModel = AppSettings.normalizedOpenRouterModel(settings.openRouterAudioModel.nilIfEmpty ?? multimodalModel)
         textModel = AppSettings.normalizedOpenRouterModel(settings.openRouterTextModel.nilIfEmpty ?? multimodalModel)
-        queryAgentModel = "google/gemini-3-flash-preview"
-        evaluationModel = AppSettings.defaultOpenRouterModel
+        queryAgentModel = AppSettings.normalizedOpenRouterModel(config.queryAgentModel)
+        evaluationModel = AppSettings.normalizedOpenRouterModel(config.evaluationModel)
         reasoningEffort = config.reasoningEffort
+        queryAgentReasoningEffort = config.queryAgentReasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         timeoutSeconds = config.timeoutSeconds
         appNameHeader = settings.openRouterAppNameHeader
         refererHeader = settings.openRouterRefererHeader
@@ -578,7 +580,6 @@ final class OpenRouterClient: @unchecked Sendable {
 
         let payload: [String: Any] = [
             "model": queryAgentModel,
-            "reasoning": ["effort": reasoningEffort],
             "temperature": 0.1,
             "response_format": [
                 "type": "json_schema",
@@ -645,8 +646,13 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
+        var requestPayload = payload
+        if let queryAgentReasoningEffort {
+            requestPayload["reasoning"] = ["effort": queryAgentReasoningEffort]
+        }
+
         return try callWithFallbackModels(
-            payload: payload,
+            payload: requestPayload,
             models: preferredQueryModels(),
             kind: "memory_query_plan",
             apiKey: apiKey
@@ -750,7 +756,6 @@ final class OpenRouterClient: @unchecked Sendable {
 
         let payload: [String: Any] = [
             "model": queryAgentModel,
-            "reasoning": ["effort": reasoningEffort],
             "temperature": 0.1,
             "max_tokens": maxTokens,
             "response_format": [
@@ -783,8 +788,13 @@ final class OpenRouterClient: @unchecked Sendable {
             ]
         ]
 
+        var requestPayload = payload
+        if let queryAgentReasoningEffort {
+            requestPayload["reasoning"] = ["effort": queryAgentReasoningEffort]
+        }
+
         return try callWithFallbackModels(
-            payload: payload,
+            payload: requestPayload,
             models: preferredQueryModels(),
             kind: "memory_query_answer",
             apiKey: apiKey

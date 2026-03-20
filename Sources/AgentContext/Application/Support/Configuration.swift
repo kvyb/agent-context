@@ -3,7 +3,10 @@ import Foundation
 struct OpenRouterRuntimeConfig: Sendable {
     let endpoint: URL
     let model: String
+    let queryAgentModel: String
+    let evaluationModel: String
     let reasoningEffort: String
+    let queryAgentReasoningEffort: String?
     let timeoutSeconds: TimeInterval
 }
 
@@ -85,7 +88,10 @@ struct TrackerConfig: Sendable {
         let openRouter = OpenRouterRuntimeConfig(
             endpoint: openRouterEndpoint,
             model: env["AGENT_CONTEXT_OPENROUTER_MODEL"]?.nilIfEmpty ?? AppSettings.defaultOpenRouterModel,
+            queryAgentModel: env["AGENT_CONTEXT_OPENROUTER_QUERY_AGENT_MODEL"]?.nilIfEmpty ?? "openai/gpt-5.4-mini",
+            evaluationModel: env["AGENT_CONTEXT_OPENROUTER_EVALUATION_MODEL"]?.nilIfEmpty ?? AppSettings.defaultOpenRouterModel,
             reasoningEffort: env["AGENT_CONTEXT_OPENROUTER_REASONING_EFFORT"]?.nilIfEmpty ?? "medium",
+            queryAgentReasoningEffort: env["AGENT_CONTEXT_OPENROUTER_QUERY_AGENT_REASONING_EFFORT"]?.nilIfEmpty,
             timeoutSeconds: max(15, TimeInterval(env["AGENT_CONTEXT_OPENROUTER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 90))
         )
         let memoryQuery = MemoryQueryRuntimeConfig(

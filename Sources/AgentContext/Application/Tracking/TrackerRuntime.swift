@@ -250,7 +250,7 @@ final class TrackerRuntime: @unchecked Sendable {
             "audio transcript chunking: \(Int(config.audioChunkSeconds))s manual controls only",
             "retention TTL days: screenshots=\(settings.screenshotTTLDays == 0 ? "forever" : "\(settings.screenshotTTLDays)") audio=\(settings.audioTTLDays == 0 ? "forever" : "\(settings.audioTTLDays)")",
             "openrouter endpoint: \(config.openRouter.endpoint.absoluteString)",
-            "openrouter models: multimodal=\(settings.openRouterModel) audio=\(settings.openRouterAudioModel) text=\(settings.openRouterTextModel) reasoning=\(config.openRouter.reasoningEffort)",
+            "openrouter models: multimodal=\(settings.openRouterModel) audio=\(settings.openRouterAudioModel) text=\(settings.openRouterTextModel) query_agent=\(config.openRouter.queryAgentModel) evaluator=\(config.openRouter.evaluationModel) reasoning=\(config.openRouter.reasoningEffort) query_reasoning=\(config.openRouter.queryAgentReasoningEffort ?? "off")",
             "mem0 enabled: \(settings.mem0Enabled) ingest_script=\(config.mem0ScriptURL.path)",
             "mem0 search script: \(config.mem0SearchScriptURL.path)",
             "python executable: \(config.pythonExecutableURL.path)",

@@ -47,7 +47,10 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
             config: OpenRouterRuntimeConfig(
                 endpoint: openRouterConfig.endpoint,
                 model: openRouterConfig.model,
+                queryAgentModel: openRouterConfig.queryAgentModel,
+                evaluationModel: openRouterConfig.evaluationModel,
                 reasoningEffort: openRouterConfig.reasoningEffort,
+                queryAgentReasoningEffort: openRouterConfig.queryAgentReasoningEffort,
                 timeoutSeconds: effectiveTimeout
             ),
             settings: settings
