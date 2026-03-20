@@ -617,7 +617,7 @@ final class ActivityDashboardStore: ObservableObject {
     }
 
     private func terminateSiblingAppInstances() {
-        guard let bundleID = Bundle.main.bundleIdentifier?.nilIfEmpty else {
+        guard let bundleID = Foundation.Bundle.main.bundleIdentifier?.nilIfEmpty else {
             return
         }
         let currentPID = ProcessInfo.processInfo.processIdentifier
@@ -1028,71 +1028,8 @@ struct ActivityDashboardView: View {
                                     Text("\(timeText(item.timestamp)) • \(item.kind.rawValue)")
                                         .font(.caption.weight(.semibold))
                                         .foregroundStyle(.secondary)
-                                    Text(item.description)
-                                        .font(.system(size: 13))
-                                    if let problem = item.problem?.nilIfEmpty {
-                                        Text("Problem: \(problem)")
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(.red)
-                                    }
-                                    if let success = item.success?.nilIfEmpty {
-                                        Text("Success: \(success)")
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(.green)
-                                    }
-                                    if let contribution = item.userContribution?.nilIfEmpty {
-                                        Text("Contribution: \(contribution)")
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    if let suggestion = item.suggestionOrDecision?.nilIfEmpty {
-                                        Text("Suggestion/Decision: \(suggestion)")
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    if item.status != .none {
-                                        Text("Status: \(artifactStatusText(item.status)) • confidence \(item.confidence, specifier: "%.2f")")
-                                            .font(.system(size: 11, weight: .semibold))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    if let project = item.project?.nilIfEmpty {
-                                        Text("Project: \(project)")
-                                            .font(.system(size: 11, weight: .semibold))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    if let workspace = item.workspace?.nilIfEmpty {
-                                        Text("Workspace: \(workspace)")
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    if let task = item.task?.nilIfEmpty {
-                                        Text("Working on: \(task)")
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(Color.accentColor)
-                                    }
-                                    if let transcript = item.transcript, !transcript.isEmpty {
-                                        Text(transcript)
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    if !item.evidence.isEmpty {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            ForEach(Array(item.evidence.prefix(4).enumerated()), id: \.offset) { _, fact in
-                                                Text("• \(fact)")
-                                                    .font(.system(size: 11))
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                        }
-                                    }
-                                    if !item.entities.isEmpty {
-                                        Text(item.entities.joined(separator: ", "))
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(.blue)
-                                    }
+                                    ActivityLogEvidenceCard(item: item)
                                 }
-                                .padding(8)
-                                .background(Color(NSColor.controlBackgroundColor))
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
                             }
                         }
                     }
@@ -1201,18 +1138,6 @@ struct ActivityDashboardView: View {
         return formatter.string(from: date)
     }
 
-    private func artifactStatusText(_ status: ArtifactInferenceStatus) -> String {
-        switch status {
-        case .none:
-            return "none"
-        case .blocked:
-            return "blocked"
-        case .inProgress:
-            return "in_progress"
-        case .resolved:
-            return "resolved"
-        }
-    }
 }
 
 struct WeekUsageStrip: View {
