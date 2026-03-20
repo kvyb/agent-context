@@ -30,6 +30,7 @@ final class HourlyActivityReporter: @unchecked Sendable {
     private let settingsProvider: () -> AppSettings
     private let apiKeyProvider: () -> String?
     private let mem0Ingestor: Mem0Ingestor
+    private let artifactTextFormatter = ArtifactAnalysisTextFormatter()
 
     private let queue = DispatchQueue(label: "agent-context.hourly.reporter", qos: .utility)
     private var timer: DispatchSourceTimer?
@@ -740,39 +741,11 @@ final class HourlyActivityReporter: @unchecked Sendable {
     }
 
     private func excerpt(from record: StoredEvidenceRecord) -> String? {
-        guard let analysis = record.analysis else { return nil }
-
-        if record.metadata.kind == .audio, let transcript = analysis.transcript?.nilIfEmpty {
-            return compact(transcript, limit: 220)
-        }
-
-        var fragments: [String] = []
-        if let content = analysis.contentDescription.nilIfEmpty {
-            fragments.append(content)
-        } else if let description = analysis.description.nilIfEmpty {
-            fragments.append(description)
-        }
-        if !analysis.salientText.isEmpty {
-            fragments.append("Visible: \(analysis.salientText.prefix(4).joined(separator: "; "))")
-        }
-        if let layout = analysis.layoutDescription.nilIfEmpty, layout != analysis.contentDescription.nilIfEmpty {
-            fragments.append("Layout: \(layout)")
-        }
-        return compact(fragments.joined(separator: " | "), limit: 220)
-    }
-
-    private func compact(_ text: String, limit: Int) -> String? {
-        guard let normalized = text
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty else {
-            return nil
-        }
-        guard normalized.count > limit else {
-            return normalized
-        }
-        let index = normalized.index(normalized.startIndex, offsetBy: limit)
-        return "\(normalized[..<index]).trimmingCharacters(in: .whitespacesAndNewlines)…"
+        artifactTextFormatter.excerpt(
+            kind: record.metadata.kind,
+            analysis: record.analysis,
+            limit: 220
+        )
     }
 
     private func uniqueArtifactKinds(_ values: [ArtifactKind]) -> [ArtifactKind] {
