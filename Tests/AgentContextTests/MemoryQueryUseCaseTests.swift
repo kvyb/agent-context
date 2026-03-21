@@ -870,7 +870,12 @@ private final class FakeLexicalRetriever: LexicalMemoryRetrieving, @unchecked Se
         self.hits = hits
     }
 
-    func retrieve(queries: [String], scope: MemoryQueryScope, limit: Int) async -> [MemoryEvidenceHit] {
+    func retrieve(
+        queries: [String],
+        scope: MemoryQueryScope,
+        limit: Int,
+        contextQuestion: String?
+    ) async -> [MemoryEvidenceHit] {
         await queryRecorder.record(queries)
         return Array(hits.prefix(limit))
     }

@@ -207,7 +207,23 @@ protocol SemanticMemoryRetrieving: Sendable {
 }
 
 protocol LexicalMemoryRetrieving: Sendable {
-    func retrieve(queries: [String], scope: MemoryQueryScope, limit: Int) async -> [MemoryEvidenceHit]
+    func retrieve(
+        queries: [String],
+        scope: MemoryQueryScope,
+        limit: Int,
+        contextQuestion: String?
+    ) async -> [MemoryEvidenceHit]
+}
+
+extension LexicalMemoryRetrieving {
+    func retrieve(queries: [String], scope: MemoryQueryScope, limit: Int) async -> [MemoryEvidenceHit] {
+        await retrieve(
+            queries: queries,
+            scope: scope,
+            limit: limit,
+            contextQuestion: nil
+        )
+    }
 }
 
 protocol MemoryQueryPlanning: Sendable {

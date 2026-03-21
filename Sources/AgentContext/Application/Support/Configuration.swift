@@ -91,7 +91,7 @@ struct TrackerConfig: Sendable {
             queryAgentModel: env["AGENT_CONTEXT_OPENROUTER_QUERY_AGENT_MODEL"]?.nilIfEmpty ?? "openai/gpt-5.4-mini",
             evaluationModel: env["AGENT_CONTEXT_OPENROUTER_EVALUATION_MODEL"]?.nilIfEmpty ?? AppSettings.defaultOpenRouterModel,
             reasoningEffort: env["AGENT_CONTEXT_OPENROUTER_REASONING_EFFORT"]?.nilIfEmpty ?? "medium",
-            queryAgentReasoningEffort: env["AGENT_CONTEXT_OPENROUTER_QUERY_AGENT_REASONING_EFFORT"]?.nilIfEmpty,
+            queryAgentReasoningEffort: env["AGENT_CONTEXT_OPENROUTER_QUERY_AGENT_REASONING_EFFORT"]?.nilIfEmpty ?? "medium",
             timeoutSeconds: max(15, TimeInterval(env["AGENT_CONTEXT_OPENROUTER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 90))
         )
         let memoryQuery = MemoryQueryRuntimeConfig(

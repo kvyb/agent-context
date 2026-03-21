@@ -136,4 +136,63 @@ final class ArtifactAnalysisDecodingTests: XCTestCase {
         XCTAssertEqual(decoded.project, "Agent Context")
         XCTAssertEqual(decoded.workspace, "Terminal")
     }
+
+    func testArtifactAnalysisModelRecoversFromEmbeddedMalformedStoredPayload() throws {
+        let input = #"""
+        {
+          "contentDescription":"{ \"description\": \"Participating in a Zoom video call with Toly Sherbakov and one other participant.\", \"content_description\": \"The Zoom meeting window displays two active video feeds: Toly Sherbakov and Kristian Vybiral.\", \"layout_description\": \"The Zoom window is centered, with the participant grid above the control bar.\", \"status\": \"in_progress\", \"confidence\": 1.0, \"project\": \"unknown\", \"workspace\": \"zoom.us\", \"task\": \"participating in a video conference call\", \"evidence\": [\"Two active video feeds visible with names Toly Sherbakov and Kristian Vybiral.\"], \"salient_text\": [\"Toly Sherbakov\", \"Kristian Vybiral\"] }",
+          "layoutDescription":"{ \"description\": \"Participating in a Zoom video call with Toly Sherbakov and one other participant.\", \"content_description\": \"The Zoom meeting window displays two active video feeds: Toly Sherbakov and Kristian Vybiral.\", \"layout_description\": \"The Zoom window is centered, with the participant grid above the control bar.\", \"status\": \"in_progress\", \"confidence\": 1.0, \"project\": \"unknown\", \"workspace\": \"zoom.us\", \"task\": \"participating in a video conference call\" }",
+          "summary":"{ \"description\": \"Participating in a Zoom video call with Toly Sherbakov and one other participant.\", \"content_description\": \"The Zoom meeting window displays two active video feeds: Toly Sherbakov and Kristian Vybiral.\", \"layout_description\": \"The Zoom window is centered, with the participant grid above the control bar.\", \"status\": \"in_progress\", \"confidence\": 1.0, \"project\": \"unknown\", \"workspace\": \"zoom.us\", \"task\": \"participating in a video conference call\" }",
+          "status":"none",
+          "confidence":0,
+          "evidence":[],
+          "description":"{ \"description\": \"Participating in a Zoom video call with Toly Sherbakov and one other participant.\", \"content_description\": \"The Zoom meeting window displays two active video feeds: Toly Sherbakov and Kristian Vybiral.\", \"layout_description\": \"The Zoom window is centered, with the participant grid above the control bar.\", \"status\": \"in_progress\", \"confidence\": 1.0, \"project\": \"unknown\", \"workspace\": \"zoom.us\", \"task\": \"participating in a video conference call\" }",
+          "insufficientEvidence":false,
+          "entities":[],
+          "salientText":[],
+          "uiElements":[]
+        }
+        """#
+
+        let decoded = try JSONDecoder().decode(ArtifactAnalysis.self, from: Data(input.utf8))
+        XCTAssertEqual(decoded.description, "Participating in a Zoom video call with Toly Sherbakov and one other participant.")
+        XCTAssertEqual(decoded.contentDescription, "The Zoom meeting window displays two active video feeds: Toly Sherbakov and Kristian Vybiral.")
+        XCTAssertEqual(decoded.layoutDescription, "The Zoom window is centered, with the participant grid above the control bar.")
+        XCTAssertEqual(decoded.status, .inProgress)
+        XCTAssertEqual(decoded.confidence, 1.0)
+        XCTAssertEqual(decoded.workspace, "zoom.us")
+        XCTAssertEqual(decoded.task, "participating in a video conference call")
+        XCTAssertEqual(decoded.salientText, ["Toly Sherbakov", "Kristian Vybiral"])
+        XCTAssertEqual(decoded.evidence, ["Two active video feeds visible with names Toly Sherbakov and Kristian Vybiral."])
+    }
+
+    func testDecodeArtifactAnalysisRecoversFromTruncatedJSONObjectText() {
+        let input = #"""
+        {
+          "description": "Participating in a Zoom video call with Toly Sherbakov and one other participant.",
+          "content_description": "The Zoom meeting window displays two active video feeds: Toly Sherbakov and Kristian Vybiral.",
+          "layout_description": "The Zoom window is centered, with the participant grid above the control bar.",
+          "status": "in_progress",
+          "confidence": 1.0,
+          "workspace": "zoom.us",
+          "task": "participating in a video conference call",
+          "evidence": [
+            "Two active video feeds visible with names Toly Sherbakov and Kristian Vybiral."
+          ],
+          "salient_text": [
+            "Toly Sherbakov",
+            "Kristian Vybiral"
+        """#
+
+        let analysis = decodeArtifactAnalysis(from: input)
+        XCTAssertEqual(analysis.description, "Participating in a Zoom video call with Toly Sherbakov and one other participant.")
+        XCTAssertEqual(analysis.contentDescription, "The Zoom meeting window displays two active video feeds: Toly Sherbakov and Kristian Vybiral.")
+        XCTAssertEqual(analysis.layoutDescription, "The Zoom window is centered, with the participant grid above the control bar.")
+        XCTAssertEqual(analysis.status, .inProgress)
+        XCTAssertEqual(analysis.confidence, 1.0)
+        XCTAssertEqual(analysis.workspace, "zoom.us")
+        XCTAssertEqual(analysis.task, "participating in a video conference call")
+        XCTAssertEqual(analysis.evidence, ["Two active video feeds visible with names Toly Sherbakov and Kristian Vybiral."])
+        XCTAssertEqual(analysis.salientText, ["Toly Sherbakov", "Kristian Vybiral"])
+    }
 }

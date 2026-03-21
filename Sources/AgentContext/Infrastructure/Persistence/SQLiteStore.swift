@@ -534,6 +534,23 @@ actor SQLiteStore {
         return output
     }
 
+    func findArtifactCaptureTimes(
+        appNameLike: String?,
+        textTerms: [String],
+        start: Date?,
+        end: Date?,
+        limit: Int
+    ) throws -> [Date] {
+        try SQLiteStoreArtifactLookup.findCaptureTimes(
+            db: db,
+            appNameLike: appNameLike,
+            textTerms: textTerms,
+            start: start,
+            end: end,
+            limit: limit
+        )
+    }
+
     func timelineForBucket(start: Date, end: Date) throws -> [TimelineSlice] {
         let sql = """
             SELECT start_time, end_time, app_name, bundle_id, project

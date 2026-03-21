@@ -64,7 +64,8 @@ struct MemoryQueryStepExecutor: Sendable {
                             scope: scope,
                             detailLevel: detailLevel,
                             retrievalPlan: retrievalPlan,
-                            deadline: deadline
+                            deadline: deadline,
+                            request: request
                         )
                     }
                 }
@@ -117,7 +118,8 @@ struct MemoryQueryStepExecutor: Sendable {
         scope: MemoryQueryScope,
         detailLevel: MemoryQueryDetailLevel,
         retrievalPlan: MemoryQueryRetrievalPlan,
-        deadline: Date?
+        deadline: Date?,
+        request: MemoryQueryRequest
     ) async -> [MemoryEvidenceHit] {
         guard budgetPolicy.remainingSeconds(until: deadline) > 0 else {
             return []
@@ -140,7 +142,8 @@ struct MemoryQueryStepExecutor: Sendable {
         return await lexicalRetriever.retrieve(
             queries: [normalizedQuery],
             scope: scope,
-            limit: effectiveStepLimit
+            limit: effectiveStepLimit,
+            contextQuestion: request.question
         )
     }
 

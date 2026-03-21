@@ -103,13 +103,28 @@ struct ArtifactAnalysis: Codable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let decodedSummary = try container.decodeIfPresent(String.self, forKey: .summary)
         let decodedDescription = try container.decodeIfPresent(String.self, forKey: .description)
-        description = decodedDescription?.nilIfEmpty ?? decodedSummary?.nilIfEmpty ?? "insufficient evidence"
         let decodedContentDescriptionValue = try container.decodeIfPresent(String.self, forKey: .contentDescription)?.nilIfEmpty
         let decodedContentDescriptionSnake = try container.decodeIfPresent(String.self, forKey: .contentDescriptionSnake)?.nilIfEmpty
-        let decodedContentDescription = decodedContentDescriptionValue ?? decodedContentDescriptionSnake
-        contentDescription = decodedContentDescription ?? description
         let decodedLayoutDescriptionValue = try container.decodeIfPresent(String.self, forKey: .layoutDescription)?.nilIfEmpty
         let decodedLayoutDescriptionSnake = try container.decodeIfPresent(String.self, forKey: .layoutDescriptionSnake)?.nilIfEmpty
+
+        if let repaired = ArtifactAnalysisRecovery.recoverEmbeddedAnalysis(
+            from: [
+                decodedContentDescriptionValue,
+                decodedContentDescriptionSnake,
+                decodedDescription,
+                decodedSummary,
+                decodedLayoutDescriptionValue,
+                decodedLayoutDescriptionSnake
+            ]
+        ) {
+            self = repaired
+            return
+        }
+
+        description = decodedDescription?.nilIfEmpty ?? decodedSummary?.nilIfEmpty ?? "insufficient evidence"
+        let decodedContentDescription = decodedContentDescriptionValue ?? decodedContentDescriptionSnake
+        contentDescription = decodedContentDescription ?? description
         layoutDescription = decodedLayoutDescriptionValue ?? decodedLayoutDescriptionSnake ?? contentDescription
         summary = decodedSummary?.nilIfEmpty ?? description
         problem = try container.decodeIfPresent(String.self, forKey: .problem)?.nilIfEmpty
@@ -204,4 +219,3 @@ enum ArtifactInferenceStatus: String, Codable, Sendable, CaseIterable {
     case inProgress = "in_progress"
     case resolved
 }
-

@@ -210,6 +210,103 @@ final class SQLiteBM25MemoryRetrieverTests: XCTestCase {
         XCTAssertTrue(hits.first?.text.contains("S1: We started with NDCG") == true)
     }
 
+    func testCallConversationQueriesPreferDirectZoomEvidenceOverRelatedTaskWork() async throws {
+        let database = try SQLiteStore(databaseURL: temporaryDatabaseURL())
+        let parser = MemoryQueryScopeParser(calendar: utcCalendar)
+        let retriever = SQLiteBM25MemoryRetriever(
+            database: database,
+            ranker: BM25Ranker(),
+            scopeParser: parser
+        )
+
+        let dayStart = date(year: 2026, month: 3, day: 20, hour: 14, minute: 0)
+        let dayEnd = date(year: 2026, month: 3, day: 20, hour: 16, minute: 0)
+
+        try await insertEvidence(
+            database: database,
+            id: "zoom-call-audio",
+            appName: "Codex",
+            capturedAt: date(year: 2026, month: 3, day: 20, hour: 14, minute: 47),
+            kind: .audio,
+            title: "Zoom call",
+            analysis: ArtifactAnalysis(
+                description: "Discussed background agent jobs and pipeline integration.",
+                summary: "Topics: BullMQ, asynchronous agent jobs, pipeline integration.",
+                transcript: "S1: What do you think about the integration? S2: We can run the agent in the background with BullMQ and sync on Monday. Toly asked about timing.",
+                entities: ["Toly Sherbakov", "BullMQ", "agent", "pipeline"],
+                insufficientEvidence: false,
+                project: "AI Service",
+                workspace: "zoom.us",
+                task: "Zoom call about agents",
+                evidence: ["BullMQ background jobs", "Monday sync"]
+            )
+        )
+
+        try await insertEvidence(
+            database: database,
+            id: "telegram-audio",
+            appName: "Telegram",
+            capturedAt: date(year: 2026, month: 3, day: 20, hour: 14, minute: 49),
+            kind: .audio,
+            title: "Telegram voice note",
+            analysis: ArtifactAnalysis(
+                description: "Toly discussed lead qualification presets and video-screen agent integration in a Telegram follow-up.",
+                summary: "Topics: lead qualification, templates, presets, video screens.",
+                transcript: "S1: Toly said we should keep working on the presets and video screens next week for the sales qualification flow.",
+                entities: ["Toly Sherbakov", "sales qualification", "video screens", "presets"],
+                insufficientEvidence: false,
+                project: "AI Service",
+                workspace: "Telegram",
+                task: "Telegram follow-up",
+                evidence: ["presets", "video screens"]
+            )
+        )
+
+        try await database.saveTaskSegments([
+            TaskSegmentRecord(
+                id: "related-task",
+                scope: "day",
+                startTime: dayStart,
+                endTime: dayEnd,
+                occurredAt: date(year: 2026, month: 3, day: 20, hour: 14, minute: 30),
+                appName: "Notion",
+                bundleID: "notion.id",
+                project: "Manychat AI Lead Qualification",
+                workspace: "Notion",
+                repo: nil,
+                document: nil,
+                url: nil,
+                task: "Review PRD for Lead Qualification Skill/Agent",
+                issueOrGoal: "Review lead qualification flowchart",
+                actions: ["Reviewed concept", "Discussed sales qualification"],
+                outcome: "Concept clarified",
+                nextStep: "Follow up later",
+                status: .inProgress,
+                confidence: 1,
+                evidenceRefs: [],
+                entities: ["lead qualification", "sales qualification", "agent"],
+                summary: "Review PRD for Lead Qualification Skill/Agent",
+                sourceSummaryID: nil,
+                promptVersion: "test"
+            )
+        ])
+
+        let hits = await retriever.retrieve(
+            queries: ["what did we talk about on the zoom call with Toly about regarding pipelines and AI agents?"],
+            scope: MemoryQueryScope(start: dayStart, end: dayEnd, label: "today"),
+            limit: 5
+        )
+
+        XCTAssertFalse(hits.isEmpty)
+        XCTAssertTrue(hits.allSatisfy {
+            let unit = $0.metadata["retrieval_unit"]
+            return unit == "transcript_unit" || unit == "transcript_chunk" || unit == "artifact_evidence"
+        })
+        XCTAssertTrue(hits.contains { $0.id.hasPrefix("transcript-unit|zoom-call-audio-transcript-") })
+        XCTAssertFalse(hits.contains { $0.id.hasPrefix("transcript-unit|telegram-audio-transcript-") })
+        XCTAssertFalse(hits.contains { $0.id == "task-segment|related-task" })
+    }
+
     private var utcCalendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

@@ -26,6 +26,9 @@ struct MemoryQueryRetrievalSupport: Sendable {
             requestOptions: request.options,
             profile: profile
         )
+        if profile.seeksCallConversation {
+            return Array(fallbackSteps.prefix(6))
+        }
         let candidateSteps = !(plan?.steps.isEmpty ?? true) ? (plan?.steps ?? []) : fallbackSteps
 
         var seen = Set<String>()
@@ -171,6 +174,10 @@ struct MemoryQueryRetrievalSupport: Sendable {
         profile: QueryIntentProfile,
         detailLevel: MemoryQueryDetailLevel
     ) -> [String] {
+        if profile.seeksCallConversation {
+            return []
+        }
+
         if profile.prefersLexicalFirst,
            steps.contains(where: { $0.sources.contains(.bm25Store) }) {
             return []

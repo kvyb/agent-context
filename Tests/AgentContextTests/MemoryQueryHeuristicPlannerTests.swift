@@ -70,4 +70,39 @@ final class MemoryQueryHeuristicPlannerTests: XCTestCase {
         XCTAssertTrue(profile.seeksWorkSummary)
         XCTAssertTrue(profile.focusTerms.contains("core"))
     }
+
+    func testProfileMarksZoomConversationQueries() {
+        let parser = MemoryQueryScopeParser()
+        let planner = MemoryQueryHeuristicPlanner(scopeParser: parser)
+        let profile = planner.profile(
+            for: "What did we talk about on the Zoom call with toly regarding pipelines and AI agents?"
+        )
+        let analysis = MemoryQueryQuestionAnalyzer(scopeParser: parser).analyze(
+            question: "What did we talk about on the Zoom call with toly regarding pipelines and AI agents?"
+        )
+
+        XCTAssertTrue(profile.prefersLexicalFirst)
+        XCTAssertTrue(analysis.seeksCallConversation)
+        XCTAssertEqual(analysis.personTerms, ["toly"])
+        XCTAssertTrue(profile.focusTerms.contains("toly"))
+        XCTAssertTrue(profile.focusTerms.contains("pipelines"))
+        XCTAssertTrue(profile.focusTerms.contains("agents"))
+    }
+
+    func testZoomConversationPlanStaysLexicalAndCallScoped() {
+        let planner = MemoryQueryHeuristicPlanner(scopeParser: MemoryQueryScopeParser())
+        let question = "What did we talk about on the Zoom call with Toly regarding pipelines and AI agents?"
+        let profile = planner.profile(for: question)
+
+        let steps = planner.defaultPlanSteps(
+            for: question,
+            requestOptions: .default,
+            profile: profile
+        )
+
+        XCTAssertFalse(steps.isEmpty)
+        XCTAssertTrue(steps.allSatisfy { $0.sources == [.bm25Store] })
+        XCTAssertEqual(steps.first?.query, question)
+        XCTAssertTrue(steps.contains { $0.query.lowercased().contains("zoom") && $0.query.lowercased().contains("toly") })
+    }
 }

@@ -149,6 +149,15 @@ func decodeArtifactAnalysis(
         )
     }
 
+    if let repaired = ArtifactAnalysisRecovery.recoverRawJSONObjectLikeText(
+        text,
+        fallbackProject: fallbackProject,
+        fallbackWorkspace: fallbackWorkspace,
+        fallbackTask: fallbackTaskHint
+    ) {
+        return repaired
+    }
+
     let fallback = cleanedFreeformText(text) ?? "insufficient evidence"
     let insufficient = fallback.lowercased().contains("insufficient evidence")
     let description = insufficient ? "insufficient evidence" : sanitizeSummaryPhrasing(fallback)

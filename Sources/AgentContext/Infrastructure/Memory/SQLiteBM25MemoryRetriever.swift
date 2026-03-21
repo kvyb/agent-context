@@ -7,6 +7,7 @@ final class SQLiteBM25MemoryRetriever: LexicalMemoryRetrieving, @unchecked Senda
     private let questionAnalyzer: MemoryQueryQuestionAnalyzer
     private let artifactSupport: SQLiteBM25ArtifactSupport
     private let hitReranker: SQLiteBM25HitReranker
+    private let callConversationSupport: SQLiteBM25CallConversationSupport
 
     init(
         database: SQLiteStore,
@@ -20,42 +21,72 @@ final class SQLiteBM25MemoryRetriever: LexicalMemoryRetrieving, @unchecked Senda
         let artifactSupport = SQLiteBM25ArtifactSupport()
         self.artifactSupport = artifactSupport
         self.hitReranker = SQLiteBM25HitReranker()
+        self.callConversationSupport = SQLiteBM25CallConversationSupport(database: database)
     }
 
-    func retrieve(queries: [String], scope: MemoryQueryScope, limit: Int) async -> [MemoryEvidenceHit] {
+    func retrieve(
+        queries: [String],
+        scope: MemoryQueryScope,
+        limit: Int,
+        contextQuestion: String?
+    ) async -> [MemoryEvidenceHit] {
         let combinedQuestion = queries.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        let analysisQuestion = contextQuestion?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? combinedQuestion
         let queryTerms = scopeParser.queryTerms(for: combinedQuestion)
         guard !queryTerms.isEmpty else {
             return []
         }
 
-        let analysis = questionAnalyzer.analyze(question: combinedQuestion)
+        let analysis = questionAnalyzer.analyze(question: analysisQuestion)
         let lookupText = bestTaskSegmentLookupText(queries: queries, queryTerms: queryTerms)
         let candidateLimit = max(limit * 3, 18)
+        let retrievalScope = await callConversationSupport.anchoredScopeIfNeeded(
+            baseScope: scope,
+            analysis: analysis
+        ) ?? scope
 
-        let taskSegments = await loadTaskSegments(
+        var taskSegments = await loadTaskSegments(
             lookupText: lookupText,
-            scope: scope,
+            scope: retrievalScope,
             limit: max(candidateLimit * 2, 24)
         )
-        let transcriptUnits = await loadTranscriptUnits(
+        var transcriptUnits = await loadTranscriptUnits(
             lookupText: lookupText,
-            scope: scope,
+            scope: retrievalScope,
             analysis: analysis,
             anchorSegments: taskSegments,
             limit: max(candidateLimit * 2, 24)
         )
-        let artifactPerceptions = await loadArtifactPerceptions(
-            scope: scope,
+        let artifactPerceptionLimit: Int
+        if analysis.seeksCallConversation, !analysis.personTerms.isEmpty {
+            artifactPerceptionLimit = max(candidateLimit * 12, 256)
+        } else {
+            artifactPerceptionLimit = max(candidateLimit * 3, 48)
+        }
+
+        var artifactPerceptions = await loadArtifactPerceptions(
+            scope: retrievalScope,
             analysis: analysis,
             anchorSegments: taskSegments,
-            limit: max(candidateLimit * 3, 48)
+            limit: artifactPerceptionLimit
         )
-        let memoryRows = await loadMemorySummaryRows(
-            scope: scope,
+        var memoryRows = await loadMemorySummaryRows(
+            scope: retrievalScope,
             analysis: analysis,
             limit: max(candidateLimit * 4, 64)
         )
+
+        let alignedRows = callConversationSupport.alignedRows(
+            taskSegments: taskSegments,
+            transcriptUnits: transcriptUnits,
+            artifactPerceptions: artifactPerceptions,
+            memoryRows: memoryRows,
+            analysis: analysis
+        )
+        taskSegments = alignedRows.taskSegments
+        transcriptUnits = alignedRows.transcriptUnits
+        artifactPerceptions = alignedRows.artifactPerceptions
+        memoryRows = alignedRows.memoryRows
 
         let taskSegmentHits = rankedTaskSegmentHits(
             taskSegments,
@@ -90,11 +121,17 @@ final class SQLiteBM25MemoryRetriever: LexicalMemoryRetrieving, @unchecked Senda
             limit: candidateLimit
         )
 
-        return rerankedLexicalHits(
+        let reranked = rerankedLexicalHits(
             taskSegmentHits + transcriptUnitHits + transcriptHits + artifactHits + memoryHits,
             analysis: analysis,
-            limit: limit
+            limit: analysis.seeksCallConversation ? max(limit * 4, 24) : limit
         )
+
+        if analysis.seeksCallConversation {
+            return callConversationSupport.scopedHits(reranked, analysis: analysis, limit: limit)
+        }
+
+        return reranked
     }
 
     private func loadTaskSegments(

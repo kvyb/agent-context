@@ -49,7 +49,7 @@ final class TrackerConfigTests: XCTestCase {
             XCTAssertEqual(config.openRouter.queryAgentModel, "openai/gpt-5.4-mini")
             XCTAssertEqual(config.openRouter.evaluationModel, "google/gemini-3.1-flash-lite-preview")
             XCTAssertEqual(config.openRouter.reasoningEffort, "medium")
-            XCTAssertNil(config.openRouter.queryAgentReasoningEffort)
+            XCTAssertEqual(config.openRouter.queryAgentReasoningEffort, "medium")
         }
     }
 

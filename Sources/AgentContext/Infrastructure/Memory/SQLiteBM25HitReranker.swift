@@ -92,6 +92,26 @@ struct SQLiteBM25HitReranker: Sendable {
         if analysis.seeksWorkSummary, unit == .taskSegment {
             boost += 0.1
         }
+        if analysis.seeksCallConversation {
+            let isZoomScoped = isZoomScoped(metadata: metadata, text: loweredText)
+            let peopleText = [metadata["people"], metadata["entities"]]
+                .compactMap { $0?.nilIfEmpty }
+                .joined(separator: " ")
+                .lowercased()
+
+            if unit == .transcriptUnit || unit == .transcriptChunk {
+                if isZoomScoped {
+                    boost += 0.42
+                }
+                if analysis.focusTerms.contains(where: { peopleText.contains($0) }) {
+                    boost += 0.32
+                }
+            } else if unit == .taskSegment {
+                boost -= isZoomScoped ? 0.08 : 0.58
+            } else {
+                boost -= isZoomScoped ? 0.12 : 0.68
+            }
+        }
 
         return boost
     }
@@ -119,6 +139,18 @@ struct SQLiteBM25HitReranker: Sendable {
         }
         if analysis.seeksWorkSummary, unit == .taskSegment {
             score += 0.45
+        }
+        if analysis.seeksCallConversation {
+            let isZoomScoped = isZoomScoped(metadata: hit.metadata, text: evidenceText(hit))
+            if unit == .transcriptUnit || unit == .transcriptChunk {
+                score += isZoomScoped ? 0.9 : 0.25
+            } else if unit == .artifactEvidence {
+                score += isZoomScoped ? 0.1 : -0.75
+            } else if unit == .taskSegment {
+                score += isZoomScoped ? -0.2 : -0.95
+            } else {
+                score -= 0.85
+            }
         }
         if analysis.prefersLexicalFirst, unit != .transcriptChunk && unit != .transcriptUnit {
             score -= analysis.seeksEvaluation ? 0.45 : 0.18
@@ -185,5 +217,18 @@ struct SQLiteBM25HitReranker: Sendable {
     private func isMetaNoise(_ text: String) -> Bool {
         let lowered = text.lowercased()
         return SQLiteBM25Heuristics.metaNoiseIndicators.contains { lowered.contains($0) }
+    }
+
+    private func isZoomScoped(metadata: [String: String], text: String) -> Bool {
+        let joined = (
+            text
+            + " "
+            + metadata.values.joined(separator: " ")
+        ).lowercased()
+        return joined.contains("zoom")
+            || joined.contains("zoom.us")
+            || joined.contains("video conference")
+            || joined.contains("meeting")
+            || joined.contains("call")
     }
 }
