@@ -105,4 +105,24 @@ final class MemoryQueryHeuristicPlannerTests: XCTestCase {
         XCTAssertEqual(steps.first?.query, question)
         XCTAssertTrue(steps.contains { $0.query.lowercased().contains("zoom") && $0.query.lowercased().contains("toly") })
     }
+
+    func testBroadCallHistoryQueriesUseCallScopedLexicalPlan() {
+        let parser = MemoryQueryScopeParser()
+        let planner = MemoryQueryHeuristicPlanner(scopeParser: parser)
+        let question = "What calls did I have today?"
+        let profile = planner.profile(for: question)
+        let analysis = MemoryQueryQuestionAnalyzer(scopeParser: parser).analyze(question: question)
+
+        let steps = planner.defaultPlanSteps(
+            for: question,
+            requestOptions: .default,
+            profile: profile
+        )
+
+        XCTAssertTrue(analysis.seeksCallConversation)
+        XCTAssertTrue(profile.prefersLexicalFirst)
+        XCTAssertFalse(steps.isEmpty)
+        XCTAssertTrue(steps.allSatisfy { $0.sources == [.bm25Store] })
+        XCTAssertTrue(steps.contains { $0.query.lowercased() == "zoom meeting" })
+    }
 }

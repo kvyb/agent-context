@@ -136,7 +136,9 @@ struct SQLiteBM25CallConversationSupport: Sendable {
         case .artifactEvidence:
             return sharesCallMedium(hit) && isZoomScoped(hit)
         case .taskSegment, .memorySummary:
-            return false
+            return analysis.personTerms.isEmpty
+                && sharesCallMedium(hit)
+                && isZoomScoped(hit)
         }
     }
 

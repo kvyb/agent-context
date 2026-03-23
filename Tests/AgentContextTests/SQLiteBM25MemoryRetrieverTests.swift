@@ -307,6 +307,58 @@ final class SQLiteBM25MemoryRetrieverTests: XCTestCase {
         XCTAssertFalse(hits.contains { $0.id == "task-segment|related-task" })
     }
 
+    func testBroadCallHistoryQueriesCanSurfaceZoomTaskSummaries() async throws {
+        let database = try SQLiteStore(databaseURL: temporaryDatabaseURL())
+        let parser = MemoryQueryScopeParser(calendar: utcCalendar)
+        let retriever = SQLiteBM25MemoryRetriever(
+            database: database,
+            ranker: BM25Ranker(),
+            scopeParser: parser
+        )
+
+        let dayStart = date(year: 2026, month: 3, day: 23, hour: 9, minute: 0)
+        let dayEnd = date(year: 2026, month: 3, day: 23, hour: 18, minute: 0)
+
+        try await database.saveTaskSegments([
+            TaskSegmentRecord(
+                id: "zoom-grooming",
+                scope: "day",
+                startTime: date(year: 2026, month: 3, day: 23, hour: 17, minute: 0),
+                endTime: date(year: 2026, month: 3, day: 23, hour: 18, minute: 0),
+                occurredAt: date(year: 2026, month: 3, day: 23, hour: 17, minute: 40),
+                appName: "zoom.us",
+                bundleID: "us.zoom.xos",
+                project: "AI features",
+                workspace: "zoom.us",
+                repo: nil,
+                document: nil,
+                url: nil,
+                task: "Attend AI features weekly grooming meeting",
+                issueOrGoal: "Discuss implementation requirements for AI features",
+                actions: ["Reviewed labeling and draft mode"],
+                outcome: "Implementation direction agreed",
+                nextStep: "Implement labeling and Draft Mode functionality",
+                status: .done,
+                confidence: 1,
+                evidenceRefs: [],
+                entities: ["AI features", "Zoom"],
+                summary: "Attend AI features weekly grooming meeting",
+                sourceSummaryID: nil,
+                promptVersion: "test"
+            )
+        ])
+
+        let hits = await retriever.retrieve(
+            queries: ["What calls did I have today?", "zoom meeting"],
+            scope: MemoryQueryScope(start: dayStart, end: dayEnd, label: "today"),
+            limit: 5,
+            contextQuestion: "What calls did I have today?"
+        )
+
+        XCTAssertTrue(hits.contains { $0.id == "task-segment|zoom-grooming" })
+        XCTAssertTrue(hits.contains { $0.metadata["retrieval_unit"] == LexicalRetrievalUnit.taskSegment.rawValue })
+    }
+
     private var utcCalendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

@@ -183,6 +183,14 @@ struct MemoryQueryRetrievalSupport: Sendable {
             return []
         }
 
+        if profile.seeksWorkSummary,
+           steps.contains(where: { $0.sources.contains(.bm25Store) }) {
+            let needsSemanticBreadth = !profile.requestedDimensions.isEmpty || profile.focusTerms.count >= 2
+            if !needsSemanticBreadth {
+                return []
+            }
+        }
+
         let maxQueries = semanticQueryCap(profile: profile, detailLevel: detailLevel)
         guard maxQueries > 0 else {
             return []

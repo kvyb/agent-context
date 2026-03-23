@@ -28,8 +28,22 @@ struct MemoryQueryQuestionAnalyzer: Sendable {
         let personTerms = extractionSupport.personTerms(for: question)
         let mentionsZoom = lowered.contains("zoom")
         let prefersLexicalFirst = MemoryQueryQuestionLexicon.transcriptLikeTerms.contains { lowered.contains($0) }
+        let mentionsCallMedium = lowered.contains("call")
+            || lowered.contains("calls")
+            || lowered.contains("meeting")
+            || lowered.contains("meetings")
+            || mentionsZoom
+        let asksAboutConversationContent = lowered.contains("talk")
+            || lowered.contains("discuss")
+            || lowered.contains("say")
+            || lowered.contains("happened")
+            || lowered.contains("happen")
+        let asksWhichCallsHappened = (lowered.contains("what") || lowered.contains("which"))
+            && mentionsCallMedium
+            && (lowered.contains(" did i have") || lowered.contains(" did we have") || lowered.contains(" had "))
         let seeksCallConversation = MemoryQueryQuestionLexicon.callConversationTerms.contains { lowered.contains($0) }
-            || ((lowered.contains("call") || lowered.contains("zoom")) && (lowered.contains("talk") || lowered.contains("discuss")))
+            || (mentionsCallMedium && asksAboutConversationContent)
+            || asksWhichCallsHappened
         let seeksEvaluation = MemoryQueryQuestionLexicon.evaluationTerms.contains { lowered.contains($0) }
         let seeksWorkSummary = MemoryQueryQuestionLexicon.workSummaryTerms.contains { lowered.contains($0) }
         let prefersDetailedAnswer = scopeParser.hasExplicitDate(in: question)

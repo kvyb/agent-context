@@ -83,13 +83,25 @@ struct MemoryQueryHeuristicQueryBuilder: Sendable {
 
         add(question)
 
+        let genericCallAnchors: Set<String> = ["call", "calls", "meeting", "meetings", "have", "had"]
         var anchorParts: [String] = []
         if profile.mentionsZoom {
             anchorParts.append("zoom")
         }
         anchorParts.append(contentsOf: profile.personTerms.prefix(2))
-        anchorParts.append(contentsOf: profile.focusTerms.prefix(4))
-        add(anchorParts.joined(separator: " "))
+        anchorParts.append(contentsOf: profile.focusTerms.filter { !genericCallAnchors.contains($0) }.prefix(4))
+        if anchorParts.isEmpty {
+            add("zoom meeting")
+            add("meeting")
+        } else {
+            add(anchorParts.joined(separator: " "))
+            if !profile.mentionsZoom {
+                add((["zoom"] + anchorParts.prefix(3)).joined(separator: " "))
+            }
+            if !anchorParts.contains("meeting") {
+                add((anchorParts.prefix(3) + ["meeting"]).joined(separator: " "))
+            }
+        }
 
         if !profile.personTerms.isEmpty && !profile.focusTerms.isEmpty {
             add((profile.personTerms.prefix(1) + profile.focusTerms.prefix(3)).joined(separator: " "))

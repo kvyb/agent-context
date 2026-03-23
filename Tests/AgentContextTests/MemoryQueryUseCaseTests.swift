@@ -231,6 +231,34 @@ final class MemoryQueryUseCaseTests: XCTestCase {
         XCTAssertEqual(semanticTimeoutCount, 0)
     }
 
+    func testGenericScopedWorkSummarySkipsSemanticSearchWhenLexicalEvidenceIsAvailable() async {
+        let semantic = FakeSemanticRetriever(hits: [
+            sampleHit(id: "s1", source: .mem0Semantic, text: "semantic", score: 0.9)
+        ])
+        let lexical = FakeLexicalRetriever(hits: [
+            sampleHit(id: "b1", source: .bm25Store, text: "Recent Codex task", score: 0.8)
+        ])
+        let useCase = MemoryQueryUseCase(
+            semanticRetriever: semantic,
+            lexicalRetriever: lexical,
+            planner: FakePlanner(result: nil),
+            answerer: FakeAnswerer(result: nil),
+            usageWriter: FakeUsageWriter(),
+            scopeParser: MemoryQueryScopeParser(),
+            runtimeConfig: sampleRuntimeConfig()
+        )
+
+        _ = await useCase.execute(
+            request: MemoryQueryRequest(
+                question: "what did I do in Codex today?",
+                outputFormat: .text
+            )
+        )
+
+        let semanticCallCount = await semantic.timeoutCount()
+        XCTAssertEqual(semanticCallCount, 0)
+    }
+
     func testUseCaseCanRunWithoutPlannerOrAnswerStageCaps() async {
         let planner = FakePlanner(
             result: MemoryQueryPlanResult(

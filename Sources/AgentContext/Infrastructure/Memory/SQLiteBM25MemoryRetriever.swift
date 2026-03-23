@@ -120,9 +120,21 @@ final class SQLiteBM25MemoryRetriever: LexicalMemoryRetrieving, @unchecked Senda
             analysis: analysis,
             limit: candidateLimit
         )
+        let broadWorkFallbackHits = recentWorkSummaryFallbackHits(
+            taskSegments: taskSegments,
+            memoryRows: memoryRows,
+            analysis: analysis,
+            limit: candidateLimit
+        )
+        let broadCallFallbackHits = recentCallSummaryFallbackHits(
+            taskSegments: taskSegments,
+            memoryRows: memoryRows,
+            analysis: analysis,
+            limit: candidateLimit
+        )
 
         let reranked = rerankedLexicalHits(
-            taskSegmentHits + transcriptUnitHits + transcriptHits + artifactHits + memoryHits,
+            taskSegmentHits + transcriptUnitHits + transcriptHits + artifactHits + memoryHits + broadWorkFallbackHits + broadCallFallbackHits,
             analysis: analysis,
             limit: analysis.seeksCallConversation ? max(limit * 4, 24) : limit
         )
@@ -576,6 +588,110 @@ final class SQLiteBM25MemoryRetriever: LexicalMemoryRetrieving, @unchecked Senda
         )
     }
 
+    private func recentWorkSummaryFallbackHits(
+        taskSegments: [TaskSegmentRecord],
+        memoryRows: [MemoryRecord],
+        analysis: MemoryQueryQuestionAnalysis,
+        limit: Int
+    ) -> [MemoryEvidenceHit] {
+        guard analysis.seeksWorkSummary, analysis.focusTerms.isEmpty else {
+            return []
+        }
+
+        let taskHits = taskSegments.prefix(max(limit, 12)).map { segment in
+            MemoryEvidenceHit(
+                id: "task-segment|\(segment.id)",
+                source: .bm25Store,
+                text: taskSegmentSummary(segment),
+                appName: segment.appName?.nilIfEmpty,
+                project: segment.project?.nilIfEmpty,
+                occurredAt: segment.occurredAt,
+                metadata: taskSegmentMetadata(segment),
+                semanticScore: 0,
+                lexicalScore: 0,
+                hybridScore: 0.92 + min(0.18, max(0, segment.confidence * 0.18))
+            )
+        }
+
+        let memoryHits = memoryRows.prefix(max(limit, 10)).enumerated().map { index, row in
+            let metadata: [String: String] = [
+                "scope": row.scope,
+                "entities": row.entities.joined(separator: "|"),
+                "retrieval_unit": LexicalRetrievalUnit.memorySummary.rawValue
+            ]
+            return MemoryEvidenceHit(
+                id: "memory-summary-fallback|\(Int(row.occurredAt.timeIntervalSince1970 / 30))|\(index)",
+                source: .bm25Store,
+                text: row.summary,
+                appName: row.appName?.nilIfEmpty,
+                project: row.project?.nilIfEmpty,
+                occurredAt: row.occurredAt,
+                metadata: metadata,
+                semanticScore: 0,
+                lexicalScore: 0,
+                hybridScore: 0.72
+            )
+        }
+
+        return taskHits + memoryHits
+    }
+
+    private func recentCallSummaryFallbackHits(
+        taskSegments: [TaskSegmentRecord],
+        memoryRows: [MemoryRecord],
+        analysis: MemoryQueryQuestionAnalysis,
+        limit: Int
+    ) -> [MemoryEvidenceHit] {
+        guard analysis.seeksCallConversation, analysis.personTerms.isEmpty else {
+            return []
+        }
+
+        let callTaskHits = taskSegments
+            .filter { isCallLike(appName: $0.appName, text: taskSegmentDocument($0)) }
+            .prefix(max(limit, 10))
+            .map { segment in
+                MemoryEvidenceHit(
+                    id: "task-segment|\(segment.id)",
+                    source: .bm25Store,
+                    text: taskSegmentSummary(segment),
+                    appName: segment.appName?.nilIfEmpty,
+                    project: segment.project?.nilIfEmpty,
+                    occurredAt: segment.occurredAt,
+                    metadata: taskSegmentMetadata(segment),
+                    semanticScore: 0,
+                    lexicalScore: 0,
+                    hybridScore: 0.82 + min(0.14, max(0, segment.confidence * 0.14))
+                )
+            }
+
+        let callMemoryHits = memoryRows
+            .filter { isCallLike(appName: $0.appName, text: memorySummaryDocument($0)) }
+            .prefix(max(limit, 8))
+            .enumerated()
+            .map { index, row in
+                let metadata: [String: String] = [
+                    "scope": row.scope,
+                    "entities": row.entities.joined(separator: "|"),
+                    "retrieval_unit": LexicalRetrievalUnit.memorySummary.rawValue,
+                    "app_name": row.appName ?? ""
+                ]
+                return MemoryEvidenceHit(
+                    id: "memory-summary-call|\(Int(row.occurredAt.timeIntervalSince1970 / 30))|\(index)",
+                    source: .bm25Store,
+                    text: row.summary,
+                    appName: row.appName?.nilIfEmpty,
+                    project: row.project?.nilIfEmpty,
+                    occurredAt: row.occurredAt,
+                    metadata: metadata,
+                    semanticScore: 0,
+                    lexicalScore: 0,
+                    hybridScore: 0.68
+                )
+            }
+
+        return callTaskHits + callMemoryHits
+    }
+
     private func bestTaskSegmentLookupText(queries: [String], queryTerms: [String]) -> String {
         let exactQuery = queries.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let lowered = exactQuery.lowercased()
@@ -717,6 +833,14 @@ final class SQLiteBM25MemoryRetriever: LexicalMemoryRetrieving, @unchecked Senda
 
     private func calendarDate(byAddingMinutes minutes: Int, to date: Date) -> Date? {
         Calendar.autoupdatingCurrent.date(byAdding: .minute, value: minutes, to: date)
+    }
+
+    private func isCallLike(appName: String?, text: String) -> Bool {
+        let searchable = ((appName ?? "") + " " + text).lowercased()
+        return searchable.contains("zoom")
+            || searchable.contains("meeting")
+            || searchable.contains("call")
+            || searchable.contains("video conference")
     }
 }
 
