@@ -133,7 +133,7 @@ final class OpenRouterClient: @unchecked Sendable {
             "model": model,
             "reasoning": ["effort": reasoningEffort],
             "temperature": 0.0,
-            "max_tokens": 380,
+            "max_tokens": 800,
             "response_format": [
                 "type": "json_schema",
                 "json_schema": [
