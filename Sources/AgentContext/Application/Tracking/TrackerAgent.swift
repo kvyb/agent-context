@@ -33,9 +33,12 @@ final class TrackerAgent: @unchecked Sendable {
     private var activationScreenshotWorkItem: DispatchWorkItem?
     private var activeScreenshotTimer: DispatchSourceTimer?
     private var retryTimer: DispatchSourceTimer?
+    private var initialFrontmostBootstrapWorkItem: DispatchWorkItem?
     private var inflightArtifactIDs = Set<String>()
     private var cachedScreenshotAnalysis: CachedScreenshotAnalysis?
     private let screenshotSimilaritySkipThreshold = 0.9975
+    private let initialFrontmostBootstrapDelaySeconds: TimeInterval = 0.25
+    private let initialFrontmostBootstrapMaxAttempts = 20
 
     init(
         config: TrackerConfig,
@@ -85,10 +88,7 @@ final class TrackerAgent: @unchecked Sendable {
             self.hourlyReporter.start()
             self.startRetryTimer()
             self.bootstrapArtifactBackfill()
-
-            if let app = NSWorkspace.shared.frontmostApplication {
-                self.handleActivated(app: app, at: Date())
-            }
+            self.bootstrapCurrentFrontmostApp(attempt: 0)
 
             DispatchQueue.main.async {
                 self.onRecordingStateChanged?(true)
@@ -103,6 +103,7 @@ final class TrackerAgent: @unchecked Sendable {
             self.isRunning = false
             self.trackingSuppressed = false
             self.appMonitor.stop()
+            self.cancelInitialFrontmostBootstrap()
             self.cancelScreenshotScheduling()
             self.stopRetryTimer()
             self.audioCoordinator.stopTranscript()
@@ -208,6 +209,7 @@ final class TrackerAgent: @unchecked Sendable {
         }
 
         if activeApp?.processIdentifier != app.processIdentifier {
+            cancelInitialFrontmostBootstrap()
             closeActiveInterval(at: timestamp)
             activeApp = app
             activeWindowContext = windowProvider.context(for: app)
@@ -624,6 +626,47 @@ final class TrackerAgent: @unchecked Sendable {
     private func stopRetryTimer() {
         retryTimer?.cancel()
         retryTimer = nil
+    }
+
+    private func bootstrapCurrentFrontmostApp(attempt: Int) {
+        guard isRunning else { return }
+        guard !trackingSuppressed else { return }
+        guard activeApp == nil else { return }
+
+        guard let app = NSWorkspace.shared.frontmostApplication else {
+            scheduleInitialFrontmostBootstrapRetry(afterAttempt: attempt)
+            return
+        }
+
+        guard !shouldIgnore(app: app) else {
+            scheduleInitialFrontmostBootstrapRetry(afterAttempt: attempt)
+            return
+        }
+
+        handleActivated(app: app, at: Date())
+    }
+
+    private func scheduleInitialFrontmostBootstrapRetry(afterAttempt attempt: Int) {
+        guard attempt < initialFrontmostBootstrapMaxAttempts else {
+            cancelInitialFrontmostBootstrap()
+            return
+        }
+
+        initialFrontmostBootstrapWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.initialFrontmostBootstrapWorkItem = nil
+            self.bootstrapCurrentFrontmostApp(attempt: attempt + 1)
+        }
+
+        initialFrontmostBootstrapWorkItem = workItem
+        stateQueue.asyncAfter(deadline: .now() + initialFrontmostBootstrapDelaySeconds, execute: workItem)
+    }
+
+    private func cancelInitialFrontmostBootstrap() {
+        initialFrontmostBootstrapWorkItem?.cancel()
+        initialFrontmostBootstrapWorkItem = nil
     }
 
     private func bootstrapArtifactBackfill() {
