@@ -112,6 +112,26 @@ class Mem0BridgeTests(unittest.TestCase):
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0]["memory"], "ManyChat work on the 16th")
 
+    def test_filter_hits_by_time_prefers_event_time_over_mem0_created_at(self) -> None:
+        start = parse_iso("2026-03-29T16:00:00Z")
+        end = parse_iso("2026-03-30T16:00:00Z")
+
+        hits = [
+            {
+                "memory": "Zoom meeting on March 30",
+                "created_at": "2026-03-31T03:13:28.087360-07:00",
+                "metadata": {
+                    "occurred_at": "2026-03-30T11:18:14.624446Z",
+                    "app_name": "zoom.us",
+                },
+            }
+        ]
+
+        filtered = filter_hits_by_time(hits, start=start, end=end)
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["memory"], "Zoom meeting on March 30")
+
     def test_rerank_candidate_limit_keeps_llm_pool_small(self) -> None:
         self.assertEqual(rerank_candidate_limit(3), 6)
         self.assertEqual(rerank_candidate_limit(5), 7)
@@ -154,6 +174,58 @@ class Mem0BridgeTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 2)
         self.assertGreaterEqual(memory.get_all.call_count, 1)
+
+    def test_scoped_query_should_fall_back_to_search_when_get_all_is_empty(self) -> None:
+        memory = mock.Mock()
+        memory.get_all.return_value = {"results": []}
+        memory.search.side_effect = [
+            {
+                "results": [
+                    {
+                        "id": "zoom-1",
+                        "memory": "Zoom meeting about feedback loop and Wednesday follow-up",
+                        "metadata": {"occurred_at": "2026-03-30T11:00:00Z", "app_name": "zoom.us"},
+                    }
+                ]
+            }
+        ]
+
+        payload = {
+            "queries": ["What were the calls yesterday about?"],
+            "start": "2026-03-29T16:00:00Z",
+            "end": "2026-03-30T16:00:00Z",
+            "timeout_seconds": 0,
+        }
+        filters = build_search_filters(payload, start=parse_iso(payload["start"]), end=parse_iso(payload["end"]))
+
+        collected = []
+        for variant in expand_day_filters(filters, start=parse_iso(payload["start"]), end=parse_iso(payload["end"])):
+            collected.extend(
+                call_get_all(
+                    memory,
+                    user_id="about-time-user",
+                    agent_id="about-time-tracker",
+                    limit=corpus_candidate_limit(24),
+                    filters=variant,
+                )
+            )
+
+        if not collected:
+            rows = []
+            for query in payload["queries"]:
+                rows.extend(
+                    memory.search(
+                        query=query,
+                        user_id="about-time-user",
+                        agent_id="about-time-tracker",
+                        limit=corpus_candidate_limit(24),
+                    )["results"]
+                )
+            collected = rows
+
+        filtered = filter_hits_by_time(collected, start=parse_iso(payload["start"]), end=parse_iso(payload["end"]))
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["memory"], "Zoom meeting about feedback loop and Wednesday follow-up")
 
 
 if __name__ == "__main__":

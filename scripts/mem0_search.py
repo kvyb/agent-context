@@ -174,7 +174,6 @@ def extract_occurred_at(hit: dict[str, Any]) -> datetime | None:
         hit.get("timestamp"),
         hit.get("event_timestamp"),
         hit.get("bucket_start"),
-        hit.get("created_at"),
     ]
     for candidate in direct_candidates:
         parsed = parse_iso(candidate) if isinstance(candidate, str) else parse_timestamp(candidate)
@@ -182,11 +181,14 @@ def extract_occurred_at(hit: dict[str, Any]) -> datetime | None:
             return parsed
 
     metadata = hit.get("metadata")
-    if not isinstance(metadata, dict):
-        return None
+    if isinstance(metadata, dict):
+        for key in ["occurred_at", "event_timestamp", "timestamp", "bucket_start"]:
+            candidate = metadata.get(key)
+            parsed = parse_iso(candidate) if isinstance(candidate, str) else parse_timestamp(candidate)
+            if parsed is not None:
+                return parsed
 
-    for key in ["occurred_at", "event_timestamp", "timestamp", "bucket_start", "created_at"]:
-        candidate = metadata.get(key)
+    for candidate in [hit.get("created_at"), metadata.get("created_at") if isinstance(metadata, dict) else None]:
         parsed = parse_iso(candidate) if isinstance(candidate, str) else parse_timestamp(candidate)
         if parsed is not None:
             return parsed
@@ -560,6 +562,26 @@ def main() -> int:
             ]
             normalized_scope_hits = [hit for hit in normalized_scope_hits if hit.get("memory")]
             collected.extend(normalized_scope_hits)
+
+        if not collected:
+            for index, query in enumerate(queries):
+                try:
+                    raw_hits = call_search(
+                        memory,
+                        query=query,
+                        payload=payload,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        limit=scope_limit,
+                        filters=filters,
+                    )
+                except Exception as exc:
+                    print(json.dumps({"status": "error", "error": f"mem0 search failed for query '{query}': {exc}"}))
+                    return 1
+
+                normalized_hits = [normalize_hit(hit, retrieved_query=query, query_rank=index) for hit in raw_hits]
+                normalized_hits = [hit for hit in normalized_hits if hit.get("memory")]
+                collected.extend(normalized_hits)
     else:
         for index, query in enumerate(queries):
             try:
