@@ -823,8 +823,11 @@ struct ActivityDashboardView: View {
         .overlay(alignment: .center) {
             if store.isQuitFinalizing {
                 QuitFinalizationOverlay()
+            } else if store.isApplyingUpdate {
+                UpdateInProgressOverlay()
             }
         }
+        .disabled(store.isApplyingUpdate || store.isQuitFinalizing)
         .sheet(isPresented: $store.isSettingsPresented) {
             SettingsView(store: store)
         }
@@ -1521,6 +1524,11 @@ struct SettingsView: View {
                 .padding(.vertical, 10)
                 .background(Color(NSColor.controlBackgroundColor).opacity(0.45))
             }
+            .disabled(store.isApplyingUpdate)
+
+            if store.isApplyingUpdate {
+                UpdateInProgressOverlay()
+            }
         }
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
@@ -1530,6 +1538,7 @@ struct SettingsView: View {
         .padding(10)
         .frame(width: 760, height: 640)
         .background(Color(NSColor.windowBackgroundColor))
+        .interactiveDismissDisabled(store.isApplyingUpdate)
         .onAppear {
             apiKeyDraft = store.settingsDraft.openRouterAPIKey ?? ""
             store.settingsDraft.openRouterModel = AppSettings.normalizedOpenRouterModel(store.settingsDraft.openRouterModel)
@@ -1783,6 +1792,25 @@ struct QuitFinalizationOverlay: View {
             Text("Finalizing pending analysis and summaries before quit...")
                 .font(.system(size: 13, weight: .semibold))
         }
+        .padding(20)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(radius: 12)
+    }
+}
+
+struct UpdateInProgressOverlay: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.large)
+            Text("Updating Agent Context...")
+                .font(.system(size: 13, weight: .semibold))
+            Text("Please wait while the app updates, rebuilds, and restarts.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+        .multilineTextAlignment(.center)
         .padding(20)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 12))
