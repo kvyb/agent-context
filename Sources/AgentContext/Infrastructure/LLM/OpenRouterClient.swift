@@ -35,6 +35,7 @@ enum MemoryQueryAnswerPromptMode {
 }
 
 final class OpenRouterClient: @unchecked Sendable {
+    private static let queryNormalizationModel = "google/gemini-3-flash-preview"
     private let endpoint: URL
     private let multimodalModel: String
     private let audioModel: String
@@ -43,11 +44,12 @@ final class OpenRouterClient: @unchecked Sendable {
     private let evaluationModel: String
     private let reasoningEffort: String
     private let queryAgentReasoningEffort: String?
-    private let timeoutSeconds: TimeInterval
+    private let timeoutSeconds: TimeInterval?
     private let appNameHeader: String?
     private let refererHeader: String?
     private let userIdentityAliases: [String]
     private let imageEncoder = OpenRouterImageEncoder()
+    private static let globalMaxTokens = 10_000
 
     init(config: OpenRouterRuntimeConfig, settings: AppSettings) {
         endpoint = config.endpoint
@@ -133,7 +135,7 @@ final class OpenRouterClient: @unchecked Sendable {
             "model": model,
             "reasoning": ["effort": reasoningEffort],
             "temperature": 0.0,
-            "max_tokens": 800,
+            "max_tokens": Self.globalMaxTokens,
             "response_format": [
                 "type": "json_schema",
                 "json_schema": [
@@ -536,130 +538,6 @@ final class OpenRouterClient: @unchecked Sendable {
         )
     }
 
-    func planMemoryQuery(
-        question: String,
-        now: Date,
-        detailLevel: MemoryQueryDetailLevel,
-        timeZone: TimeZone,
-        apiKey: String
-    ) throws -> OpenRouterCallResult {
-        let systemPrompt = """
-        You generate compact retrieval plans for a life-log memory store.
-        Return strict JSON only with keys: detail_level, steps, timeframe.
-        Rules:
-        - steps: 1-8 structured retrieval steps ordered by execution priority.
-        - Each step must contain: query, phase, sources, max_results.
-        - query must be short and retrieval-oriented (nouns/entities/actions), never answer-oriented.
-        - phase must be either research or evidence.
-        - sources must contain one or both of: bm25, mem0.
-        - Use bm25 research steps when you need fast local reconnaissance before broader evidence retrieval.
-        - Use evidence steps for the main retrieval pass.
-        - If the question names a specific project/repo/person/entity, include that token verbatim in most step queries.
-        - Keep user entities/nouns exactly as written when present.
-        - Add aliases only when high-confidence and concise.
-        - Avoid paraphrase explosion; do not output near-duplicate steps.
-        - max_results should usually be between 3 and 12.
-        - detail_level must be either concise or detailed.
-        - Infer detail_level from user intent (detailed report/timeline/exhaustive requests => detailed).
-        - timeframe must include start, end, label.
-        - start/end: ISO8601 timestamp or empty string when not inferable.
-        - label: short scope hint such as today/this week/last month, else empty string.
-        - If user provides explicit dates (for example 2026-03-10 to 2026-03-14), preserve those exact day boundaries in timeframe.
-        - Resolve relative dates using provided local time context and timezone.
-        - For detailed/timeline/report requests, produce query variants that maximize evidence recall across the requested period.
-        - If the question explicitly asks for dimensions or aspects (for example projects, blockers, people involved, decisions, fit), make sure the plan covers each requested dimension.
-        - Keep the plan query-driven; do not rely on canned task-specific templates.
-        - Never answer the user question here.
-        """
-
-        let userPrompt = """
-        Current UTC time: \(iso8601(now))
-        Current local time (\(timeZone.identifier)): \(localTimestamp(now, timeZone: timeZone))
-        Current retrieval mode hint (you may override): \(detailLevel.rawValue)
-        User question: \(question)
-        """
-
-        let payload: [String: Any] = [
-            "model": queryAgentModel,
-            "temperature": 0.1,
-            "response_format": [
-                "type": "json_schema",
-                "json_schema": [
-                    "name": "memory_query_plan",
-                    "strict": true,
-                    "schema": [
-                        "type": "object",
-                        "properties": [
-                            "detail_level": [
-                                "type": "string",
-                                "enum": ["concise", "detailed"]
-                            ],
-                            "steps": [
-                                "type": "array",
-                                "items": [
-                                    "type": "object",
-                                    "properties": [
-                                        "query": ["type": "string"],
-                                        "phase": [
-                                            "type": "string",
-                                            "enum": ["research", "evidence"]
-                                        ],
-                                        "sources": [
-                                            "type": "array",
-                                            "items": [
-                                                "type": "string",
-                                                "enum": ["bm25", "mem0"]
-                                            ],
-                                            "minItems": 1,
-                                            "maxItems": 2
-                                        ],
-                                        "max_results": [
-                                            "type": "integer",
-                                            "minimum": 1,
-                                            "maximum": 20
-                                        ]
-                                    ],
-                                    "required": ["query", "phase", "sources", "max_results"],
-                                    "additionalProperties": false
-                                ],
-                                "minItems": 1,
-                                "maxItems": 8
-                            ],
-                            "timeframe": [
-                                "type": "object",
-                                "properties": [
-                                    "start": ["type": "string"],
-                                    "end": ["type": "string"],
-                                    "label": ["type": "string"]
-                                ],
-                                "required": ["start", "end", "label"],
-                                "additionalProperties": false
-                            ]
-                        ],
-                        "required": ["detail_level", "steps", "timeframe"],
-                        "additionalProperties": false
-                    ]
-                ]
-            ],
-            "messages": [
-                ["role": "system", "content": systemPrompt],
-                ["role": "user", "content": userPrompt]
-            ]
-        ]
-
-        var requestPayload = payload
-        if let queryAgentReasoningEffort {
-            requestPayload["reasoning"] = ["effort": queryAgentReasoningEffort]
-        }
-
-        return try callWithFallbackModels(
-            payload: requestPayload,
-            models: preferredQueryModels(),
-            kind: "memory_query_plan",
-            apiKey: apiKey
-        )
-    }
-
     func answerMemoryQuery(
         question: String,
         scope: MemoryQueryScope,
@@ -668,22 +546,18 @@ final class OpenRouterClient: @unchecked Sendable {
         now: Date,
         timeZone: TimeZone,
         mem0EvidenceLines: [String],
-        bm25EvidenceLines: [String],
         promptMode: MemoryQueryAnswerPromptMode = .primary,
         apiKey: String
     ) throws -> OpenRouterCallResult {
         let systemPrompt: String
-        let maxTokens: Int
         switch promptMode {
         case .primary:
             systemPrompt = """
-            You answer memory questions using only retrieved evidence from two retrieval sources.
+            You answer memory questions using only retrieved evidence from Mem0.
             Return strict JSON with keys: answer, key_points, supporting_events, insufficient_evidence.
             Rules:
             - Use only provided evidence; never invent facts.
-            - There are two sources: MEM0_SEMANTIC and BM25_STORAGE.
-            - Prefer facts that appear in both sources when possible.
-            - If sources conflict, state the conflict explicitly and lower confidence.
+            - Treat MEM0_SEMANTIC as the full retrieval source for this answer.
             - Keep the answer focused on the entities/topics explicitly asked in the question; skip unrelated memories.
             - answer should directly address the user's question.
             - Infer the best answer structure from the question itself.
@@ -698,9 +572,11 @@ final class OpenRouterClient: @unchecked Sendable {
             - supporting_events: short event lines with timestamps/apps when available.
             - If evidence is weak or missing for parts of the question, set insufficient_evidence=true and state limits.
             - Treat explicit dates as hard constraints.
-            - Keep the full JSON response under roughly 2000 tokens.
             - If detail level is detailed: provide chronological, specific event breakdown and avoid hand-wavy summary language.
             - If full-context mode is true, treat the provided evidence as the full scoped corpus and synthesize comprehensively instead of only selecting a few highlights.
+            - If evidence spans multiple days, apps, or projects, reflect that spread instead of collapsing the answer onto one dominant cluster.
+            - For broad scoped work-summary questions, prefer denser coverage over brevity: cover the main days/themes first, then mention gaps.
+            - supporting_events should sample across different days, apps, or projects when the evidence supports that breadth.
             - If detail level is detailed:
               - answer must start with a one-paragraph summary,
               - choose chronology or topical grouping based on what the user asked for,
@@ -709,13 +585,13 @@ final class OpenRouterClient: @unchecked Sendable {
               - include concrete actions, changes, outcomes, and open follow-ups,
               - include concrete artifacts when present (files, commands, URLs, errors, PRs/issues, model names, settings keys),
               - avoid vague phrases like "worked on stuff" or "made progress",
-              - key_points should usually be 8-30 items,
-              - supporting_events should usually be 12-120 items when evidence exists.
+              - when the scope covers several days, answer should usually be 3-6 compact paragraphs or grouped bullet sections rather than one compressed paragraph,
+              - key_points should usually be 8-24 items,
+              - supporting_events should usually be 8-40 items when evidence exists.
             - If detail level is concise:
               - keep key_points around 3-8 and supporting_events around 4-16.
             - If requested scope is broad but evidence is sparse, be explicit about gaps by day or topic.
             """
-            maxTokens = 1800
         case .retry:
             systemPrompt = """
             Return exactly one JSON object with keys: answer, key_points, supporting_events, insufficient_evidence.
@@ -727,16 +603,15 @@ final class OpenRouterClient: @unchecked Sendable {
             - supporting_events: 4-16 short timestamped strings when evidence exists.
             - insufficient_evidence: boolean.
             - For interview or transcript questions, ground judgments in concrete exchanges or answers from transcript chunks.
-            - Keep the whole response compact and under roughly 1500 tokens.
+            - If the evidence clearly spans multiple days or themes, preserve that spread instead of over-compressing to one cluster.
+            - For detailed work-summary questions, prefer 2-5 compact paragraphs and 6-20 key points when evidence supports it.
             """
-            maxTokens = 1400
         }
 
         let scopeText = scope.label?.nilIfEmpty ?? "unspecified"
         let scopeStartText = scope.start.map(iso8601) ?? ""
         let scopeEndText = scope.end.map(iso8601) ?? ""
         let mem0Text = mem0EvidenceLines.isEmpty ? "- none" : mem0EvidenceLines.joined(separator: "\n")
-        let bm25Text = bm25EvidenceLines.isEmpty ? "- none" : bm25EvidenceLines.joined(separator: "\n")
         let userPrompt = """
         Current UTC time: \(iso8601(now))
         Current local time (\(timeZone.identifier)): \(localTimestamp(now, timeZone: timeZone))
@@ -750,15 +625,12 @@ final class OpenRouterClient: @unchecked Sendable {
 
         MEM0_SEMANTIC evidence:
         \(mem0Text)
-
-        BM25_STORAGE evidence:
-        \(bm25Text)
         """
 
         let payload: [String: Any] = [
             "model": queryAgentModel,
             "temperature": 0.1,
-            "max_tokens": maxTokens,
+            "max_tokens": Self.globalMaxTokens,
             "response_format": [
                 "type": "json_schema",
                 "json_schema": [
@@ -802,6 +674,79 @@ final class OpenRouterClient: @unchecked Sendable {
         )
     }
 
+    func normalizeMemoryQuery(
+        question: String,
+        scope: MemoryQueryScope,
+        now: Date,
+        timeZone: TimeZone,
+        apiKey: String
+    ) throws -> OpenRouterCallResult {
+        let scopeText = scope.label?.nilIfEmpty ?? "unspecified"
+        let scopeStartText = scope.start.map(iso8601) ?? ""
+        let scopeEndText = scope.end.map(iso8601) ?? ""
+        let systemPrompt = """
+        Rewrite a memory query into short high-recall search queries for Mem0.
+        Return strict JSON with exactly one key: search_queries.
+        Rules:
+        - search_queries must contain 1 to 3 strings.
+        - Resolve relative dates like yesterday, today, last Tuesday, this week, and last month into explicit YYYY-MM-DD wording when possible.
+        - Preserve the user's real intent, entities, apps, projects, and action words.
+        - Keep each query concise and searchable, not conversational.
+        - Prefer concrete nouns and verbs over filler.
+        - If the query is about calls, meetings, or Zoom, include terms about discussion content, meetings, calls, or transcripts when relevant.
+        - Do not invent facts beyond the provided question, current time, and scope.
+        - The first query should be the best direct retrieval query.
+        """
+
+        let userPrompt = """
+        Current UTC time: \(iso8601(now))
+        Current local time (\(timeZone.identifier)): \(localTimestamp(now, timeZone: timeZone))
+        Scope label: \(scopeText)
+        Scope start: \(scopeStartText)
+        Scope end: \(scopeEndText)
+        Original question: \(question)
+        """
+
+        let payload: [String: Any] = [
+            "model": Self.queryNormalizationModel,
+            "reasoning": ["effort": "low"],
+            "temperature": 0.0,
+            "max_tokens": 400,
+            "response_format": [
+                "type": "json_schema",
+                "json_schema": [
+                    "name": "memory_query_normalization",
+                    "strict": true,
+                    "schema": [
+                        "type": "object",
+                        "properties": [
+                            "search_queries": [
+                                "type": "array",
+                                "items": ["type": "string"],
+                                "minItems": 1,
+                                "maxItems": 3
+                            ]
+                        ],
+                        "required": ["search_queries"],
+                        "additionalProperties": false
+                    ]
+                ]
+            ],
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": userPrompt]
+            ]
+        ]
+
+        return try call(
+            payload: payload,
+            model: Self.queryNormalizationModel,
+            kind: "memory_query_normalization",
+            apiKey: apiKey,
+            timeoutSeconds: timeoutSeconds
+        )
+    }
+
     func evaluateMemoryQuery(
         question: String,
         answer: String,
@@ -810,7 +755,6 @@ final class OpenRouterClient: @unchecked Sendable {
         scope: MemoryQueryScope,
         detailLevel: MemoryQueryDetailLevel,
         mem0EvidenceLines: [String],
-        bm25EvidenceLines: [String],
         keyPoints: [String],
         supportingEvents: [String],
         apiKey: String
@@ -853,7 +797,6 @@ final class OpenRouterClient: @unchecked Sendable {
         let scopeStartText = scope.start.map(iso8601) ?? ""
         let scopeEndText = scope.end.map(iso8601) ?? ""
         let mem0Text = mem0EvidenceLines.isEmpty ? "- none" : mem0EvidenceLines.joined(separator: "\n")
-        let bm25Text = bm25EvidenceLines.isEmpty ? "- none" : bm25EvidenceLines.joined(separator: "\n")
         let keyPointsText = keyPoints.isEmpty ? "- none" : keyPoints.map { "- \($0)" }.joined(separator: "\n")
         let supportingEventsText = supportingEvents.isEmpty ? "- none" : supportingEvents.map { "- \($0)" }.joined(separator: "\n")
         let userPrompt = """
@@ -876,16 +819,13 @@ final class OpenRouterClient: @unchecked Sendable {
 
         MEM0_SEMANTIC evidence:
         \(mem0Text)
-
-        BM25_STORAGE evidence:
-        \(bm25Text)
         """
 
         let payload: [String: Any] = [
             "model": evaluationModel,
             "reasoning": ["effort": "low"],
             "temperature": 0.0,
-            "max_tokens": 900,
+            "max_tokens": Self.globalMaxTokens,
             "response_format": [
                 "type": "json_schema",
                 "json_schema": [
@@ -960,14 +900,10 @@ final class OpenRouterClient: @unchecked Sendable {
         apiKey: String
     ) throws -> OpenRouterCallResult {
         var latestError: Error?
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
         for model in models {
             var modelPayload = payload
             modelPayload["model"] = model
-            let remainingTimeout = max(0.5, deadline.timeIntervalSinceNow)
-            if remainingTimeout <= 0.5, latestError != nil {
-                break
-            }
+            let remainingTimeout = timeoutSeconds.map { max(0.5, $0) }
             do {
                 return try call(
                     payload: modelPayload,
@@ -993,14 +929,16 @@ final class OpenRouterClient: @unchecked Sendable {
         model: String,
         kind: String,
         apiKey: String,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval?
     ) throws -> OpenRouterCallResult {
         let body = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.httpBody = body
-        request.timeoutInterval = timeoutSeconds
+        if let timeoutSeconds {
+            request.timeoutInterval = timeoutSeconds
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         if let appNameHeader, !appNameHeader.isEmpty {
@@ -1019,14 +957,18 @@ final class OpenRouterClient: @unchecked Sendable {
         }
         task.resume()
 
-        let waitResult = semaphore.wait(timeout: .now() + timeoutSeconds + 1)
-        if waitResult == .timedOut {
-            task.cancel()
-            throw NSError(
-                domain: "OpenRouterClient",
-                code: 12,
-                userInfo: [NSLocalizedDescriptionKey: "Request timed out after \(String(format: "%.1f", timeoutSeconds))s"]
-            )
+        if let timeoutSeconds {
+            let waitResult = semaphore.wait(timeout: .now() + timeoutSeconds + 1)
+            if waitResult == .timedOut {
+                task.cancel()
+                throw NSError(
+                    domain: "OpenRouterClient",
+                    code: 12,
+                    userInfo: [NSLocalizedDescriptionKey: "Request timed out after \(String(format: "%.1f", timeoutSeconds))s"]
+                )
+            }
+        } else {
+            semaphore.wait()
         }
 
         let snapshot = box.snapshot()

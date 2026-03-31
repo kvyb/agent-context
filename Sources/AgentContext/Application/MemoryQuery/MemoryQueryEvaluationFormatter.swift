@@ -25,8 +25,7 @@ struct MemoryQueryEvaluationFormatter: Sendable {
                 "supporting_events": trace.result.supportingEvents,
                 "insufficient_evidence": trace.result.insufficientEvidence,
                 "sources": [
-                    "mem0_semantic_count": trace.result.mem0SemanticCount,
-                    "bm25_store_count": trace.result.bm25StoreCount
+                    "mem0_semantic_count": trace.result.mem0SemanticCount
                 ],
                 "time_scope": [
                     "start": trace.result.scope.start.map { iso.string(from: $0) } ?? "",
@@ -74,7 +73,7 @@ struct MemoryQueryEvaluationFormatter: Sendable {
         lines.append("Query: \(trace.result.query)")
         lines.append("Latency: \(String(format: "%.2fs", report.latencySeconds))")
         lines.append("Answer origin: \(trace.answerOrigin.rawValue)")
-        lines.append("Evidence counts: mem0=\(trace.result.mem0SemanticCount) bm25=\(trace.result.bm25StoreCount)")
+        lines.append("Evidence count: mem0=\(trace.result.mem0SemanticCount)")
         lines.append("")
         lines.append("Answer:")
         lines.append(trace.result.answer)
@@ -118,7 +117,7 @@ struct MemoryQueryEvaluationFormatter: Sendable {
     }
 
     private func retrievalPreview(for report: MemoryQueryEvaluationReport) -> [String] {
-        let ordered = (report.trace.bm25Evidence + report.trace.mem0Evidence)
+        let ordered = report.trace.mem0Evidence
             .sorted {
                 if abs($0.hybridScore - $1.hybridScore) > 0.0001 {
                     return $0.hybridScore > $1.hybridScore

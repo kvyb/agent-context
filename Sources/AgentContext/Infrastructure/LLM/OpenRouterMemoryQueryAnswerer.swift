@@ -30,16 +30,23 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
         now: Date,
         timeZone: TimeZone,
         mem0Evidence: [MemoryEvidenceHit],
-        bm25Evidence: [MemoryEvidenceHit],
         timeoutSeconds: TimeInterval?
     ) async -> MemoryQueryAnswerResult? {
         guard let apiKey = apiKeyProvider()?.nilIfEmpty else {
             return nil
         }
-        let effectiveTimeout = timeoutSeconds.map { min(openRouterConfig.timeoutSeconds, $0) } ?? openRouterConfig.timeoutSeconds
-        guard effectiveTimeout > 0 else {
-            return nil
-        }
+        let effectiveTimeout: TimeInterval? = {
+            switch (timeoutSeconds, openRouterConfig.timeoutSeconds) {
+            case let (lhs?, rhs?):
+                return min(lhs, rhs)
+            case let (lhs?, nil):
+                return lhs
+            case let (nil, rhs?):
+                return rhs
+            case (nil, nil):
+                return nil
+            }
+        }()
 
         let settings = settingsProvider()
         let analysis = questionAnalyzer.analyze(question: question)
@@ -60,12 +67,21 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
             ? (fullContextMode ? 96 : (detailLevel == .detailed ? 72 : 36))
             : (fullContextMode ? 180 : (detailLevel == .detailed ? 120 : 36))
         let orderedMem0 = orderedEvidence(mem0Evidence, detailLevel: detailLevel, analysis: analysis)
-        let orderedBM25 = orderedEvidence(bm25Evidence, detailLevel: detailLevel, analysis: analysis)
-        let mem0Lines = orderedMem0.prefix(evidenceLimit).map(evidenceFormatter.formatLine)
-        let bm25Lines = orderedBM25.prefix(evidenceLimit).map(evidenceFormatter.formatLine)
+        let mem0Lines = selectedEvidence(
+            from: orderedMem0,
+            limit: evidenceLimit,
+            scope: scope,
+            detailLevel: detailLevel,
+            analysis: analysis
+        ).map(evidenceFormatter.formatLine)
         let retryEvidenceLimit = analysis.prefersLexicalFirst ? min(evidenceLimit, 40) : min(evidenceLimit, 28)
-        let retryMem0Lines = orderedMem0.prefix(retryEvidenceLimit).map(evidenceFormatter.formatLine)
-        let retryBM25Lines = orderedBM25.prefix(retryEvidenceLimit).map(evidenceFormatter.formatLine)
+        let retryMem0Lines = selectedEvidence(
+            from: orderedMem0,
+            limit: retryEvidenceLimit,
+            scope: scope,
+            detailLevel: detailLevel,
+            analysis: analysis
+        ).map(evidenceFormatter.formatLine)
 
         do {
             let response = try client.answerMemoryQuery(
@@ -76,7 +92,6 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
                 now: now,
                 timeZone: timeZone,
                 mem0EvidenceLines: mem0Lines,
-                bm25EvidenceLines: bm25Lines,
                 apiKey: apiKey
             )
 
@@ -93,7 +108,6 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
                 now: now,
                 timeZone: timeZone,
                 mem0EvidenceLines: retryMem0Lines,
-                bm25EvidenceLines: retryBM25Lines,
                 promptMode: .retry,
                 apiKey: apiKey
             )
@@ -117,7 +131,6 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
                     now: now,
                     timeZone: timeZone,
                     mem0EvidenceLines: retryMem0Lines,
-                    bm25EvidenceLines: retryBM25Lines,
                     promptMode: .retry,
                     apiKey: apiKey
                 )
@@ -160,6 +173,22 @@ final class OpenRouterMemoryQueryAnswerer: MemoryQueryAnswering, @unchecked Send
             }
             return left > right
         }
+    }
+
+    private func selectedEvidence(
+        from orderedEvidence: [MemoryEvidenceHit],
+        limit: Int,
+        scope: MemoryQueryScope,
+        detailLevel: MemoryQueryDetailLevel,
+        analysis: MemoryQueryQuestionAnalysis
+    ) -> [MemoryEvidenceHit] {
+        MemoryQueryEvidenceSelection.prioritizedSubset(
+            from: orderedEvidence,
+            limit: limit,
+            detailLevel: detailLevel,
+            analysis: analysis,
+            scope: scope
+        )
     }
 
     private func isTranscriptChunk(_ hit: MemoryEvidenceHit) -> Bool {

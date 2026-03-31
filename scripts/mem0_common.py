@@ -138,7 +138,7 @@ def build_mem0_config() -> dict[str, Any]:
     openrouter_base_url = os.getenv("AGENT_CONTEXT_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     llm_model = os.getenv(
         "AGENT_CONTEXT_MEM0_LLM_MODEL",
-        os.getenv("AGENT_CONTEXT_OPENROUTER_MODEL", "google/gemini-3.1-flash-lite-preview"),
+        "google/gemini-3-flash-preview",
     )
     embed_model = os.getenv("AGENT_CONTEXT_MEM0_EMBED_MODEL", "openai/text-embedding-3-small")
     rerank_model = os.getenv("AGENT_CONTEXT_MEM0_RERANK_MODEL", llm_model)

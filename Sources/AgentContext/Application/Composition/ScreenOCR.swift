@@ -14,23 +14,16 @@ final class MemoryQueryService: @unchecked Sendable {
     ) {
         let codec = MemoryQueryJSONCodec()
         let scopeParser = MemoryQueryScopeParser()
-        let ranker = BM25Ranker()
         let usageWriter = SQLiteUsageEventWriter(database: database)
 
         let semanticRetriever = Mem0SemanticMemoryRetriever(
             searcher: mem0Searcher,
             settingsProvider: settingsProvider
         )
-        let lexicalRetriever = SQLiteBM25MemoryRetriever(
-            database: database,
-            ranker: ranker,
-            scopeParser: scopeParser
-        )
-        let planner = OpenRouterMemoryQueryPlanner(
+        let normalizer = OpenRouterMemoryQueryNormalizer(
             openRouterConfig: openRouterConfig,
             settingsProvider: settingsProvider,
-            apiKeyProvider: apiKeyProvider,
-            codec: codec
+            apiKeyProvider: apiKeyProvider
         )
         let answerer = OpenRouterMemoryQueryAnswerer(
             openRouterConfig: openRouterConfig,
@@ -41,23 +34,13 @@ final class MemoryQueryService: @unchecked Sendable {
 
         useCase = MemoryQueryUseCase(
             semanticRetriever: semanticRetriever,
-            lexicalRetriever: lexicalRetriever,
-            planner: planner,
+            normalizer: normalizer,
             answerer: answerer,
             usageWriter: usageWriter,
             scopeParser: scopeParser,
             runtimeConfig: runtimeConfig
         )
         formatter = MemoryQueryFormatter(codec: codec)
-    }
-
-    func answer(query: String) async -> String {
-        await render(
-            request: MemoryQueryRequest(
-                question: query,
-                outputFormat: .text
-            )
-        )
     }
 
     func render(request: MemoryQueryRequest) async -> String {

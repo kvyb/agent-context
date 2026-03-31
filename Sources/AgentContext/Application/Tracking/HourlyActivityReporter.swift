@@ -38,6 +38,7 @@ final class HourlyActivityReporter: @unchecked Sendable {
     private var drainingSemaphore: DispatchSemaphore?
     private let calendar: Calendar
     private let maxWorkItemsPerTick = 24
+    private let maxAssetMemoriesPerTick = 96
     private let mem0RetryMinimumAgeSeconds: TimeInterval = 60
     private let synthesisPromptVersion = "v2-task-segments"
 
@@ -114,6 +115,7 @@ final class HourlyActivityReporter: @unchecked Sendable {
     private func processTick(referenceDate: Date) {
         finalizeReadyIntervals(referenceDate: referenceDate)
         finalizeReadyHours(referenceDate: referenceDate)
+        enqueuePendingAssetMemories()
         processMem0Backfill(referenceDate: referenceDate)
     }
 
@@ -526,6 +528,29 @@ final class HourlyActivityReporter: @unchecked Sendable {
         }
     }
 
+    private func enqueuePendingAssetMemories() {
+        let candidates: [StoredEvidenceRecord]
+
+        do {
+            candidates = try wait { [self] in
+                try await self.database.listAnalyzedEvidenceMissingMem0AssetPayloads(
+                    limit: self.maxAssetMemoriesPerTick
+                )
+            }
+        } catch {
+            logger.error("Failed loading asset-analysis Mem0 backfill candidates: \(error.localizedDescription)")
+            return
+        }
+
+        guard !candidates.isEmpty else {
+            return
+        }
+
+        for candidate in candidates {
+            persistMemory(assetMemoryPayload(candidate))
+        }
+    }
+
     private func makeTaskSegmentRecords(
         scope: String,
         start: Date,
@@ -672,6 +697,170 @@ final class HourlyActivityReporter: @unchecked Sendable {
             summary: taskSegmentContent(segment),
             entities: segment.entities,
             metadata: metadata
+        )
+    }
+
+    private func assetMemoryPayload(_ record: StoredEvidenceRecord) -> MemoryPayload {
+        let metadata = record.metadata
+        let analysis = record.analysis
+        let occurredAt = metadata.capturedAt
+        let project = analysis?.project?.nilIfEmpty ?? metadata.window.project?.nilIfEmpty
+
+        var payloadMetadata: [String: String] = [
+            "scope": "asset_analysis",
+            "source_kind": PromotedSourceKind.artifactPerception.rawValue,
+            "artifact_kind": metadata.kind.rawValue,
+            "evidence_id": metadata.id,
+            "captured_at": ISO8601DateFormatter().string(from: occurredAt),
+            "capture_reason": metadata.captureReason,
+            "sequence_in_interval": String(metadata.sequenceInInterval),
+            "pid": String(metadata.app.pid)
+        ]
+
+        if let bundleID = metadata.app.bundleID?.nilIfEmpty {
+            payloadMetadata["bundle_id"] = bundleID
+        }
+        if let intervalID = metadata.intervalID?.nilIfEmpty {
+            payloadMetadata["interval_id"] = intervalID
+        }
+        if let title = metadata.window.title?.nilIfEmpty {
+            payloadMetadata["window_title"] = title
+        }
+        if let document = metadata.window.documentPath?.nilIfEmpty {
+            payloadMetadata["document"] = document
+        }
+        if let url = metadata.window.url?.nilIfEmpty {
+            payloadMetadata["url"] = url
+        }
+        if let workspace = (analysis?.workspace?.nilIfEmpty ?? metadata.window.workspace?.nilIfEmpty) {
+            payloadMetadata["workspace"] = workspace
+        }
+        if let task = analysis?.task?.nilIfEmpty {
+            payloadMetadata["task"] = task
+        }
+        if let status = analysis?.status.rawValue.nilIfEmpty {
+            payloadMetadata["status"] = status
+        }
+        if let description = analysis?.description.nilIfEmpty {
+            payloadMetadata["description"] = description
+        }
+        if let contentDescription = analysis?.contentDescription.nilIfEmpty {
+            payloadMetadata["content_description"] = contentDescription
+        }
+        if let layoutDescription = analysis?.layoutDescription.nilIfEmpty {
+            payloadMetadata["layout_description"] = layoutDescription
+        }
+        if let summary = analysis?.summary.nilIfEmpty {
+            payloadMetadata["analysis_summary"] = summary
+        }
+        if let confidence = analysis.map(\.confidence) {
+            payloadMetadata["confidence"] = String(format: "%.2f", max(0, min(1, confidence)))
+        }
+        if let llmExcerpt = artifactTextFormatter.excerpt(kind: metadata.kind, analysis: analysis, limit: 300) {
+            payloadMetadata["analysis_excerpt"] = llmExcerpt
+        }
+        if let salient = analysis?.salientText.prefix(8), !salient.isEmpty {
+            payloadMetadata["salient_text"] = salient.joined(separator: " | ")
+        }
+        if let evidence = analysis?.evidence.prefix(8), !evidence.isEmpty {
+            payloadMetadata["evidence"] = evidence.joined(separator: " | ")
+        }
+
+        return MemoryPayload(
+            id: "asset-\(metadata.id)",
+            scope: "asset_analysis",
+            occurredAt: occurredAt,
+            appName: metadata.app.appName,
+            project: project,
+            summary: assetMemoryContent(record),
+            entities: assetMemoryEntities(record),
+            metadata: payloadMetadata
+        )
+    }
+
+    private func assetMemoryContent(_ record: StoredEvidenceRecord) -> String {
+        let metadata = record.metadata
+        let analysis = record.analysis
+        var fragments: [String] = [
+            "Asset kind: \(metadata.kind.rawValue)",
+            "App: \(metadata.app.appName)"
+        ]
+
+        if let summary = analysis?.summary.nilIfEmpty {
+            fragments.append("Summary: \(summary)")
+        }
+        if let description = analysis?.description.nilIfEmpty {
+            fragments.append("Description: \(description)")
+        }
+        if let contentDescription = analysis?.contentDescription.nilIfEmpty {
+            fragments.append("Content description: \(contentDescription)")
+        }
+        if let layoutDescription = analysis?.layoutDescription.nilIfEmpty {
+            fragments.append("Layout description: \(layoutDescription)")
+        }
+        if let transcript = analysis?.transcript?.nilIfEmpty {
+            fragments.append("Transcript: \(transcript)")
+        }
+        if let task = analysis?.task?.nilIfEmpty {
+            fragments.append("Task: \(task)")
+        }
+        if let problem = analysis?.problem?.nilIfEmpty {
+            fragments.append("Problem: \(problem)")
+        }
+        if let success = analysis?.success?.nilIfEmpty {
+            fragments.append("Success: \(success)")
+        }
+        if let contribution = analysis?.userContribution?.nilIfEmpty {
+            fragments.append("User contribution: \(contribution)")
+        }
+        if let decision = analysis?.suggestionOrDecision?.nilIfEmpty {
+            fragments.append("Decision: \(decision)")
+        }
+        if let workspace = (analysis?.workspace?.nilIfEmpty ?? metadata.window.workspace?.nilIfEmpty) {
+            fragments.append("Workspace: \(workspace)")
+        }
+        if let project = (analysis?.project?.nilIfEmpty ?? metadata.window.project?.nilIfEmpty) {
+            fragments.append("Project: \(project)")
+        }
+        if let title = metadata.window.title?.nilIfEmpty {
+            fragments.append("Window title: \(title)")
+        }
+        if let document = metadata.window.documentPath?.nilIfEmpty {
+            fragments.append("Document: \(document)")
+        }
+        if let url = metadata.window.url?.nilIfEmpty {
+            fragments.append("URL: \(url)")
+        }
+        if let salient = analysis?.salientText.prefix(8), !salient.isEmpty {
+            fragments.append("Salient text: \(salient.joined(separator: "; "))")
+        }
+        if let entities = analysis?.entities.prefix(12), !entities.isEmpty {
+            fragments.append("Entities: \(entities.joined(separator: "; "))")
+        }
+        if let evidence = analysis?.evidence.prefix(8), !evidence.isEmpty {
+            fragments.append("Evidence: \(evidence.joined(separator: "; "))")
+        }
+
+        return fragments.joined(separator: " | ")
+    }
+
+    private func assetMemoryEntities(_ record: StoredEvidenceRecord) -> [String] {
+        let metadata = record.metadata
+        let analysis = record.analysis
+        let salient = Array(analysis?.salientText.prefix(8) ?? [])
+        return uniqueList(
+            (analysis?.entities ?? [])
+            + salient
+            + (analysis?.evidence ?? [])
+            + [
+                metadata.app.appName,
+                analysis?.project,
+                analysis?.workspace,
+                analysis?.task,
+                metadata.window.project,
+                metadata.window.workspace,
+                metadata.window.title
+            ].compactMap { $0?.nilIfEmpty }
         )
     }
 

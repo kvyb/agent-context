@@ -6,8 +6,14 @@ from __future__ import annotations
 import json
 import inspect
 import os
-from datetime import datetime, timezone
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from mem0_common import (
     build_mem0_config,
@@ -16,7 +22,6 @@ from mem0_common import (
     parse_iso,
     stringify_metadata_value,
     unique_strings,
-    unix_timestamp,
 )
 
 
@@ -67,6 +72,10 @@ def query_prefers_keyword_coverage(query: str, payload: dict[str, Any]) -> bool:
 
 
 def should_use_rerank(payload: dict[str, Any], final_limit: int) -> bool:
+    timeout_budget = payload.get("timeout_seconds")
+    if isinstance(timeout_budget, (int, float)) and float(timeout_budget) < 12:
+        return False
+
     raw_queries = payload.get("queries")
     query_count = len([item for item in raw_queries if isinstance(item, str) and item.strip()]) if isinstance(raw_queries, list) else 1
     return query_count <= 2
@@ -75,6 +84,16 @@ def should_use_rerank(payload: dict[str, Any], final_limit: int) -> bool:
 def rerank_candidate_limit(final_limit: int) -> int:
     bounded_limit = max(1, min(final_limit, 100))
     return min(max(bounded_limit + 2, 6), 8)
+
+
+def semantic_candidate_limit(final_limit: int) -> int:
+    bounded_limit = max(1, min(final_limit, 100))
+    return min(max(bounded_limit * 2, 12), 24)
+
+
+def corpus_candidate_limit(final_limit: int) -> int:
+    bounded_limit = max(1, min(final_limit, 100))
+    return min(max(bounded_limit * 6, 36), 100)
 
 
 def build_search_option_sets(
@@ -154,6 +173,8 @@ def extract_occurred_at(hit: dict[str, Any]) -> datetime | None:
         hit.get("occurred_at"),
         hit.get("timestamp"),
         hit.get("event_timestamp"),
+        hit.get("bucket_start"),
+        hit.get("created_at"),
     ]
     for candidate in direct_candidates:
         parsed = parse_iso(candidate) if isinstance(candidate, str) else parse_timestamp(candidate)
@@ -164,7 +185,7 @@ def extract_occurred_at(hit: dict[str, Any]) -> datetime | None:
     if not isinstance(metadata, dict):
         return None
 
-    for key in ["occurred_at", "event_timestamp", "timestamp"]:
+    for key in ["occurred_at", "event_timestamp", "timestamp", "bucket_start", "created_at"]:
         candidate = metadata.get(key)
         parsed = parse_iso(candidate) if isinstance(candidate, str) else parse_timestamp(candidate)
         if parsed is not None:
@@ -173,15 +194,7 @@ def extract_occurred_at(hit: dict[str, Any]) -> datetime | None:
 
 
 def build_search_filters(payload: dict[str, Any], start: datetime | None, end: datetime | None) -> dict[str, Any] | None:
-    clauses: list[dict[str, Any]] = []
-
-    time_filter: dict[str, Any] = {}
-    if start is not None:
-        time_filter["gte"] = unix_timestamp(start)
-    if end is not None:
-        time_filter["lt"] = unix_timestamp(end)
-    if time_filter:
-        clauses.append({"event_timestamp": time_filter})
+    filters: dict[str, Any] = {}
 
     for payload_key, filter_key in [
         ("projects", "project"),
@@ -194,22 +207,45 @@ def build_search_filters(payload: dict[str, Any], start: datetime | None, end: d
     ]:
         raw_value = payload.get(payload_key)
         values = unique_strings(raw_value if isinstance(raw_value, list) else [raw_value] if raw_value is not None else [])
-        if not values:
+        if len(values) != 1:
             continue
-        if len(values) == 1:
-            clauses.append({filter_key: values[0]})
-        else:
-            clauses.append({filter_key: {"in": values}})
+        filters[filter_key] = values[0]
 
     extra_filters = payload.get("filters")
     if isinstance(extra_filters, dict) and extra_filters:
-        clauses.append(extra_filters)
+        for raw_key, raw_value in extra_filters.items():
+            if not isinstance(raw_key, str):
+                continue
+            rendered = stringify_metadata_value(raw_value)
+            if rendered:
+                filters[raw_key] = rendered
 
-    if not clauses:
-        return None
-    if len(clauses) == 1:
-        return clauses[0]
-    return {"AND": clauses}
+    # The installed Mem0 Qdrant adapter only accepts flat exact-match filters.
+    return filters or None
+
+
+def expand_day_filters(
+    filters: dict[str, Any] | None,
+    start: datetime | None,
+    end: datetime | None,
+) -> list[dict[str, Any] | None]:
+    if start is None or end is None or end <= start:
+        return [filters]
+
+    day_start = start.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = end.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    day_count = max(1, int((day_end - day_start).total_seconds() // 86_400))
+    if day_count > 14:
+        return [filters]
+
+    output: list[dict[str, Any] | None] = []
+    current = day_start
+    while current < end:
+        scoped_filters = dict(filters or {})
+        scoped_filters["event_day"] = current.strftime("%Y-%m-%d")
+        output.append(scoped_filters)
+        current += timedelta(days=1)
+    return output or [filters]
 
 
 def search_attempts(
@@ -246,14 +282,7 @@ def search_attempts(
                 last_error = exc
                 continue
 
-            rows: list[dict[str, Any]]
-            if isinstance(raw, list):
-                rows = [row for row in raw if isinstance(row, dict)]
-            elif isinstance(raw, dict):
-                results = raw.get("results")
-                rows = [row for row in results if isinstance(row, dict)] if isinstance(results, list) else []
-            else:
-                rows = []
+            rows = response_rows(raw)
 
             if rows:
                 return rows
@@ -262,6 +291,16 @@ def search_attempts(
         return []
     if last_error is not None:
         raise last_error
+    return []
+
+
+def response_rows(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        return [row for row in raw if isinstance(row, dict)]
+    if isinstance(raw, dict):
+        results = raw.get("results")
+        if isinstance(results, list):
+            return [row for row in results if isinstance(row, dict)]
     return []
 
 
@@ -304,6 +343,56 @@ def call_search(
         collected.extend(rows)
         if len(collected) >= limit:
             break
+    return collected
+
+
+def call_get_all(
+    memory,
+    user_id: str,
+    agent_id: str,
+    limit: int,
+    filters: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not hasattr(memory, "get_all"):
+        return []
+
+    supported_parameters = set(inspect.signature(memory.get_all).parameters.keys())
+    attempts: list[dict[str, Any]] = []
+    if user_id and agent_id:
+        attempts.append({"user_id": user_id, "agent_id": agent_id})
+    if user_id:
+        attempts.append({"user_id": user_id})
+    if agent_id:
+        attempts.append({"agent_id": agent_id})
+    if not attempts:
+        attempts.append({})
+
+    seen: set[str] = set()
+    collected: list[dict[str, Any]] = []
+    for scope_kwargs in attempts:
+        key = json.dumps(scope_kwargs, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        kwargs = {key: value for key, value in scope_kwargs.items() if key in supported_parameters}
+        if "limit" in supported_parameters:
+            kwargs["limit"] = max(1, min(limit, 100))
+        if filters and "filters" in supported_parameters:
+            kwargs["filters"] = filters
+
+        try:
+            raw = memory.get_all(**kwargs)
+        except Exception:
+            continue
+
+        rows = response_rows(raw)
+        if not rows:
+            continue
+        collected.extend(rows)
+        if len(collected) >= limit:
+            break
+
     return collected
 
 
@@ -413,9 +502,10 @@ def main() -> int:
 
     limit = int(payload.get("limit", 20))
     limit = max(1, min(limit, 100))
+    semantic_limit = semantic_candidate_limit(limit)
+    scope_limit = corpus_candidate_limit(limit)
     start = parse_iso(payload.get("start") if isinstance(payload.get("start"), str) else None)
     end = parse_iso(payload.get("end") if isinstance(payload.get("end"), str) else None)
-
     user_id = os.getenv("AGENT_CONTEXT_MEM0_USER_ID", "agent-context-user")
     agent_id = os.getenv("AGENT_CONTEXT_MEM0_AGENT_ID", "agent-context-tracker")
     openrouter_key = (
@@ -454,28 +544,46 @@ def main() -> int:
     filters = build_search_filters(payload, start=start, end=end)
 
     collected: list[dict[str, Any]] = []
-    for index, query in enumerate(queries):
-        try:
-            raw_hits = call_search(
+    if start or end:
+        filter_variants = expand_day_filters(filters, start=start, end=end)
+        for variant in filter_variants:
+            scope_hits = call_get_all(
                 memory,
-                query=query,
-                payload=payload,
                 user_id=user_id,
                 agent_id=agent_id,
-                limit=limit,
-                filters=filters,
+                limit=scope_limit,
+                filters=variant,
             )
-        except Exception as exc:
-            print(json.dumps({"status": "error", "error": f"mem0 search failed for query '{query}': {exc}"}))
-            return 1
+            normalized_scope_hits = [
+                normalize_hit(hit, retrieved_query="__scope_corpus__", query_rank=len(queries))
+                for hit in scope_hits
+            ]
+            normalized_scope_hits = [hit for hit in normalized_scope_hits if hit.get("memory")]
+            collected.extend(normalized_scope_hits)
+    else:
+        for index, query in enumerate(queries):
+            try:
+                raw_hits = call_search(
+                    memory,
+                    query=query,
+                    payload=payload,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    limit=semantic_limit,
+                    filters=filters,
+                )
+            except Exception as exc:
+                print(json.dumps({"status": "error", "error": f"mem0 search failed for query '{query}': {exc}"}))
+                return 1
 
-        normalized_hits = [normalize_hit(hit, retrieved_query=query, query_rank=index) for hit in raw_hits]
-        normalized_hits = [hit for hit in normalized_hits if hit.get("memory")]
-        collected.extend(normalized_hits)
+            normalized_hits = [normalize_hit(hit, retrieved_query=query, query_rank=index) for hit in raw_hits]
+            normalized_hits = [hit for hit in normalized_hits if hit.get("memory")]
+            collected.extend(normalized_hits)
 
     hits = filter_hits_by_time(collected, start=start, end=end)
     hits = dedupe_and_sort_hits(hits)
-    print(json.dumps({"status": "ok", "hits": hits[:limit]}, default=str))
+    output_limit = scope_limit if (start or end) else semantic_limit
+    print(json.dumps({"status": "ok", "hits": hits[:output_limit]}, default=str))
     return 0
 
 

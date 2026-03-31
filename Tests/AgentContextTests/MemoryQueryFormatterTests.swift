@@ -12,7 +12,6 @@ final class MemoryQueryFormatterTests: XCTestCase {
             supportingEvents: ["2026-03-12: Reviewed ai-service PR"],
             insufficientEvidence: false,
             mem0SemanticCount: 12,
-            bm25StoreCount: 8,
             scope: MemoryQueryScope(start: now, end: now.addingTimeInterval(3600), label: "today"),
             generatedAt: now
         )
@@ -41,7 +40,6 @@ final class MemoryQueryFormatterTests: XCTestCase {
             supportingEvents: ["Event A"],
             insufficientEvidence: true,
             mem0SemanticCount: 1,
-            bm25StoreCount: 1,
             scope: MemoryQueryScope(start: nil, end: nil, label: nil),
             generatedAt: Date()
         )

@@ -1,45 +1,6 @@
 import Foundation
 
 struct MemoryQueryJSONCodec: Sendable {
-    func parsePlan(from text: String) -> MemoryQueryPlan? {
-        guard let object = parseJSONObject(from: text) else { return nil }
-
-        let structuredSteps = parseSteps(from: object)
-        let queries = ((object["queries"] as? [String]) ?? [])
-            + ((object["search_queries"] as? [String]) ?? [])
-
-        var start: Date?
-        var end: Date?
-        var label: String?
-        if let timeframe = object["timeframe"] as? [String: Any] {
-            start = parseDate(timeframe["start"] as? String)
-            end = parseDate(timeframe["end"] as? String)
-            label = (timeframe["label"] as? String)?.nilIfEmpty
-        } else {
-            start = parseDate(object["start"] as? String)
-            end = parseDate(object["end"] as? String)
-            label = (object["scope_label"] as? String)?.nilIfEmpty
-        }
-
-        let detailLevelRaw = (object["detail_level"] as? String)?.lowercased() ?? ""
-        let detailLevel = MemoryQueryDetailLevel(rawValue: detailLevelRaw) ?? .concise
-
-        let scope = MemoryQueryScope(start: start, end: end, label: label)
-        if !structuredSteps.isEmpty {
-            return MemoryQueryPlan(
-                steps: structuredSteps,
-                scope: scope,
-                detailLevel: detailLevel
-            )
-        }
-
-        return MemoryQueryPlan(
-            queries: queries.compactMap(\.nilIfEmpty),
-            scope: scope,
-            detailLevel: detailLevel
-        )
-    }
-
     func parseAnswer(from text: String) -> MemoryQueryAnswerPayload? {
         if let object = parseJSONObject(from: text) {
             return answerPayload(from: object)
@@ -85,8 +46,7 @@ struct MemoryQueryJSONCodec: Sendable {
             "supporting_events": result.supportingEvents,
             "insufficient_evidence": result.insufficientEvidence,
             "sources": [
-                "mem0_semantic_count": result.mem0SemanticCount,
-                "bm25_store_count": result.bm25StoreCount
+                "mem0_semantic_count": result.mem0SemanticCount
             ],
             "generated_at": iso.string(from: result.generatedAt)
         ]
@@ -148,66 +108,6 @@ struct MemoryQueryJSONCodec: Sendable {
             return nil
         }
         return String(text[start...end])
-    }
-
-    private func parseDate(_ raw: String?) -> Date? {
-        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
-            return nil
-        }
-
-        let iso = ISO8601DateFormatter()
-        if let date = iso.date(from: value) {
-            return date
-        }
-
-        let dayFormatter = DateFormatter()
-        dayFormatter.locale = Locale(identifier: "en_US_POSIX")
-        dayFormatter.timeZone = .autoupdatingCurrent
-        dayFormatter.dateFormat = "yyyy-MM-dd"
-        return dayFormatter.date(from: value)
-    }
-
-    private func parseSteps(from object: [String: Any]) -> [MemoryQueryPlanStep] {
-        guard let rawSteps = object["steps"] as? [[String: Any]] else {
-            return []
-        }
-
-        return rawSteps.compactMap { raw in
-            guard let query = (raw["query"] as? String)?.nilIfEmpty else {
-                return nil
-            }
-
-            let phaseRaw = (raw["phase"] as? String)?.lowercased() ?? MemoryQueryStepPhase.evidence.rawValue
-            let phase = MemoryQueryStepPhase(rawValue: phaseRaw) ?? .evidence
-
-            let sources: Set<MemoryEvidenceSource>
-            if let rawSources = raw["sources"] as? [String] {
-                let parsed = rawSources.reduce(into: Set<MemoryEvidenceSource>()) { acc, source in
-                    if let value = MemoryEvidenceSource(cliValue: source) {
-                        acc.insert(value)
-                    }
-                }
-                sources = parsed.isEmpty ? Set(MemoryEvidenceSource.allCases) : parsed
-            } else {
-                sources = Set(MemoryEvidenceSource.allCases)
-            }
-
-            let maxResults: Int?
-            if let rawMax = raw["max_results"] as? Int {
-                maxResults = max(1, min(rawMax, 50))
-            } else if let rawMax = raw["max_results"] as? Double {
-                maxResults = max(1, min(Int(rawMax), 50))
-            } else {
-                maxResults = nil
-            }
-
-            return MemoryQueryPlanStep(
-                query: query,
-                sources: sources,
-                phase: phase,
-                maxResults: maxResults
-            )
-        }
     }
 
     private func extractJSONStringValue(for key: String, in text: String) -> String? {

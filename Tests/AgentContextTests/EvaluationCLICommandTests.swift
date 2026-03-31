@@ -8,13 +8,11 @@ final class EvaluationCLICommandTests: XCTestCase {
             "evaluate-query",
             "what did i do on 2026-03-16?",
             "--json",
-            "--source", "bm25",
             "--timeout", "20"
         ])
 
         XCTAssertEqual(options?.query, "what did i do on 2026-03-16?")
         XCTAssertEqual(options?.outputFormat, .json)
-        XCTAssertEqual(options?.requestOptions.sources, [.bm25Store])
         XCTAssertEqual(options?.requestOptions.timeoutSeconds ?? 0, 20, accuracy: 0.001)
     }
 

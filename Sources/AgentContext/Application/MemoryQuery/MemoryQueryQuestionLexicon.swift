@@ -115,11 +115,4 @@ enum MemoryQueryQuestionLexicon {
         "about", "regarding", "on", "for", "during", "around", "and", "or", "the", "a", "an",
         "what", "how", "did", "we", "talk", "discuss", "zoom", "call", "meeting"
     ]
-
-    static let plannerFacetTokens: Set<String> = [
-        "project", "projects", "task", "tasks", "takeaway", "takeaways",
-        "learning", "learnings", "struggle", "struggles", "blocker", "blockers",
-        "problem", "problems", "summary", "summarize", "summarise", "timeline",
-        "bugs", "decisions", "issues", "people", "steps"
-    ]
 }

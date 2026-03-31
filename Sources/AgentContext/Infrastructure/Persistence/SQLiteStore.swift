@@ -534,6 +534,34 @@ actor SQLiteStore {
         return output
     }
 
+    func listAnalyzedEvidenceMissingMem0AssetPayloads(limit: Int) throws -> [StoredEvidenceRecord] {
+        let sql = """
+            SELECT id, kind, artifact_path, captured_at, app_name, bundle_id, pid,
+                   window_title, document_path, window_url, workspace, project,
+                   interval_id, capture_reason, sequence_in_interval, analysis_json
+              FROM evidence
+             WHERE analysis_json IS NOT NULL
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM mem0_memory
+                     WHERE id = 'asset-' || evidence.id
+               )
+             ORDER BY captured_at ASC
+             LIMIT ?;
+        """
+
+        var statement: OpaquePointer?
+        try prepare(sql, statement: &statement)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(max(1, min(limit, 5_000))))
+
+        var output: [StoredEvidenceRecord] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            output.append(decodeStoredEvidenceRecord(from: statement, fallbackAppName: nil))
+        }
+        return output
+    }
+
     func findArtifactCaptureTimes(
         appNameLike: String?,
         textTerms: [String],

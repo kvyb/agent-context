@@ -46,24 +46,6 @@ struct MemoryQueryBudgetPolicy: Sendable {
         return remaining > 0 ? remaining : nil
     }
 
-    func plannerReserveSeconds(request: MemoryQueryRequest, profile: QueryIntentProfile) -> TimeInterval {
-        let detailedBuffer: TimeInterval = profile.prefersDetailedAnswer ? 1.5 : 0
-        if profile.prefersLexicalFirst {
-            let base: TimeInterval = request.options.includesSemanticSearch && request.options.includesLexicalSearch ? 3 : 2
-            return base + detailedBuffer
-        }
-        let base: TimeInterval = request.options.includesSemanticSearch || request.options.includesLexicalSearch ? 2 : 0
-        return base + detailedBuffer
-    }
-
-    func semanticReserveSeconds(request: MemoryQueryRequest, profile: QueryIntentProfile) -> TimeInterval {
-        let detailedBuffer: TimeInterval = profile.prefersDetailedAnswer ? 0.75 : 0
-        if profile.prefersLexicalFirst && request.options.includesLexicalSearch {
-            return 1.5 + detailedBuffer
-        }
-        return (request.options.includesLexicalSearch ? 1 : 0.5) + detailedBuffer
-    }
-
     func formattedSeconds(_ value: TimeInterval) -> String {
         String(format: "%.1fs", value)
     }

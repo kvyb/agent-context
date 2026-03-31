@@ -9,7 +9,6 @@ struct MemoryQueryResultFactory: Sendable {
             supportingEvents: [],
             insufficientEvidence: true,
             mem0SemanticCount: 0,
-            bm25StoreCount: 0,
             scope: MemoryQueryScope(start: nil, end: nil, label: nil),
             generatedAt: Date()
         )
@@ -23,7 +22,6 @@ struct MemoryQueryResultFactory: Sendable {
             supportingEvents: [],
             insufficientEvidence: true,
             mem0SemanticCount: 0,
-            bm25StoreCount: 0,
             scope: scope,
             generatedAt: Date()
         )
@@ -37,7 +35,6 @@ struct MemoryQueryResultFactory: Sendable {
             supportingEvents: [],
             insufficientEvidence: true,
             mem0SemanticCount: 0,
-            bm25StoreCount: 0,
             scope: scope,
             generatedAt: Date()
         )
@@ -46,7 +43,6 @@ struct MemoryQueryResultFactory: Sendable {
     func trace(
         result: MemoryQueryResult,
         mem0Evidence: [MemoryEvidenceHit],
-        bm25Evidence: [MemoryEvidenceHit],
         detailLevel: MemoryQueryDetailLevel,
         fullContextMode: Bool,
         answerOrigin: MemoryQueryAnswerOrigin
@@ -54,7 +50,6 @@ struct MemoryQueryResultFactory: Sendable {
         MemoryQueryExecutionTrace(
             result: result,
             mem0Evidence: mem0Evidence,
-            bm25Evidence: bm25Evidence,
             detailLevel: detailLevel,
             fullContextMode: fullContextMode,
             answerOrigin: answerOrigin

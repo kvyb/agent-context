@@ -92,13 +92,10 @@ private func makeMem0ProcessEnvironment(
         env["OPENAI_API_KEY"] = key
     }
 
-    if let model = normalizedMem0EnvironmentValue(settings.openRouterTextModel)
-        ?? normalizedMem0EnvironmentValue(settings.openRouterModel)
-        ?? normalizedMem0EnvironmentValue(env["AGENT_CONTEXT_OPENROUTER_TEXT_MODEL"])
-        ?? normalizedMem0EnvironmentValue(env["AGENT_CONTEXT_OPENROUTER_MODEL"]) {
-        env["AGENT_CONTEXT_MEM0_LLM_MODEL"] = model
-        env["AGENT_CONTEXT_MEM0_RERANK_MODEL"] = env["AGENT_CONTEXT_MEM0_RERANK_MODEL"] ?? model
-    }
+    let mem0LLMModel = normalizedMem0EnvironmentValue(env["AGENT_CONTEXT_MEM0_LLM_MODEL"])
+        ?? "google/gemini-3-flash-preview"
+    env["AGENT_CONTEXT_MEM0_LLM_MODEL"] = mem0LLMModel
+    env["AGENT_CONTEXT_MEM0_RERANK_MODEL"] = env["AGENT_CONTEXT_MEM0_RERANK_MODEL"] ?? mem0LLMModel
 
     env["OPENAI_BASE_URL"] = env["AGENT_CONTEXT_OPENROUTER_BASE_URL"]
     env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] = env["AGENT_CONTEXT_MEM0_EMBED_MODEL"] ?? "openai/text-embedding-3-small"
@@ -280,7 +277,8 @@ final class Mem0Searcher: @unchecked Sendable {
             "query": normalizedQueries[0],
             "start": start.map { ISO8601DateFormatter().string(from: $0) } ?? "",
             "end": end.map { ISO8601DateFormatter().string(from: $0) } ?? "",
-            "limit": max(1, min(100, limit))
+            "limit": max(1, min(100, limit)),
+            "timeout_seconds": timeoutSeconds ?? 0
         ]
 
         let inputData = try? JSONSerialization.data(withJSONObject: input, options: [])
@@ -290,7 +288,8 @@ final class Mem0Searcher: @unchecked Sendable {
             "Mem0 search started: query_count=\(normalizedQueries.count) limit=\(max(1, min(100, limit))) timeout=\(String(format: "%.1fs", timeoutSeconds ?? 0)) start=\(start.map { ISO8601DateFormatter().string(from: $0) } ?? "-") end=\(end.map { ISO8601DateFormatter().string(from: $0) } ?? "-")"
         )
         do {
-            capture = try runProcessAndCapture(process, stdin: inputData, timeoutSeconds: timeoutSeconds)
+            let processTimeout = timeoutSeconds.map { $0 + 5 }
+            capture = try runProcessAndCapture(process, stdin: inputData, timeoutSeconds: processTimeout)
         } catch {
             logger.error("Mem0 search launch failed: \(error.localizedDescription)")
             return []

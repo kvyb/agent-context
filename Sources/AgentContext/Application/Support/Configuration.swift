@@ -7,14 +7,13 @@ struct OpenRouterRuntimeConfig: Sendable {
     let evaluationModel: String
     let reasoningEffort: String
     let queryAgentReasoningEffort: String?
-    let timeoutSeconds: TimeInterval
+    let timeoutSeconds: TimeInterval?
 }
 
 struct MemoryQueryRuntimeConfig: Sendable {
     let timeoutSeconds: TimeInterval?
-    let plannerTimeoutSeconds: TimeInterval?
     let answerTimeoutSeconds: TimeInterval?
-    let semanticSearchTimeoutSeconds: TimeInterval
+    let semanticSearchTimeoutSeconds: TimeInterval?
 }
 
 struct TrackerConfig: Sendable {
@@ -92,13 +91,12 @@ struct TrackerConfig: Sendable {
             evaluationModel: env["AGENT_CONTEXT_OPENROUTER_EVALUATION_MODEL"]?.nilIfEmpty ?? AppSettings.defaultOpenRouterModel,
             reasoningEffort: env["AGENT_CONTEXT_OPENROUTER_REASONING_EFFORT"]?.nilIfEmpty ?? "medium",
             queryAgentReasoningEffort: env["AGENT_CONTEXT_OPENROUTER_QUERY_AGENT_REASONING_EFFORT"]?.nilIfEmpty ?? "medium",
-            timeoutSeconds: max(15, TimeInterval(env["AGENT_CONTEXT_OPENROUTER_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 90))
+            timeoutSeconds: parseOptionalTimeout(env["AGENT_CONTEXT_OPENROUTER_TIMEOUT_SECONDS"])
         )
         let memoryQuery = MemoryQueryRuntimeConfig(
-            timeoutSeconds: parseOptionalTimeout(env["AGENT_CONTEXT_MEMORY_QUERY_TIMEOUT_SECONDS"]) ?? 60,
-            plannerTimeoutSeconds: parseOptionalTimeout(env["AGENT_CONTEXT_MEMORY_QUERY_PLANNER_TIMEOUT_SECONDS"]),
+            timeoutSeconds: parseOptionalTimeout(env["AGENT_CONTEXT_MEMORY_QUERY_TIMEOUT_SECONDS"]),
             answerTimeoutSeconds: parseOptionalTimeout(env["AGENT_CONTEXT_MEMORY_QUERY_ANSWER_TIMEOUT_SECONDS"]),
-            semanticSearchTimeoutSeconds: min(10, max(2, TimeInterval(env["AGENT_CONTEXT_MEM0_SEARCH_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 6)))
+            semanticSearchTimeoutSeconds: parseOptionalTimeout(env["AGENT_CONTEXT_MEM0_SEARCH_TIMEOUT_SECONDS"])
         )
 
         return TrackerConfig(

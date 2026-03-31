@@ -6,6 +6,12 @@ from __future__ import annotations
 import json
 import inspect
 import os
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from mem0_common import (
     build_mem0_config,
@@ -17,7 +23,15 @@ from mem0_common import (
 )
 
 
-def add_memory(memory, content: str, user_id: str, agent_id: str, metadata: dict, timestamp: int | None):
+def add_memory(
+    memory,
+    content: str,
+    user_id: str,
+    agent_id: str,
+    metadata: dict,
+    timestamp: int | None,
+    infer: bool,
+):
     """Add a memory using the public API first, then a private local fallback if needed."""
     normalized_metadata = dict(metadata or {})
     if user_id:
@@ -42,7 +56,7 @@ def add_memory(memory, content: str, user_id: str, agent_id: str, metadata: dict
     for scope_kwargs in attempts:
         kwargs = {
             **scope_kwargs,
-            "infer": True,
+            "infer": infer,
             "metadata": normalized_metadata,
         }
         if supports_timestamp and timestamp is not None:
@@ -65,7 +79,7 @@ def add_memory(memory, content: str, user_id: str, agent_id: str, metadata: dict
 
         try:
             messages = [{"role": "user", "content": content}]
-            results = memory._add_to_vector_store(messages, normalized_metadata, filters, infer=True)
+            results = memory._add_to_vector_store(messages, normalized_metadata, filters, infer=infer)
             return {"results": results, "mode": "single_thread_vector_store"}
         except Exception as exc:
             last_error = exc
@@ -119,6 +133,7 @@ def main() -> int:
     metadata = build_memory_metadata(payload)
     occurred_at = parse_iso(payload.get("occurredAt") if isinstance(payload.get("occurredAt"), str) else None)
     timestamp = unix_timestamp(occurred_at)
+    infer = normalize_string(payload.get("scope")) != "asset_analysis"
 
     try:
         result = add_memory(
@@ -128,6 +143,7 @@ def main() -> int:
             agent_id=agent_id,
             metadata=metadata,
             timestamp=timestamp,
+            infer=infer,
         )
     except Exception as exc:
         print(json.dumps({"status": "error", "error": f"mem0 add failed: {exc}"}))

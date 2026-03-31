@@ -3,7 +3,6 @@ import Foundation
 enum QueryCLIArgumentError: Error, LocalizedError {
     case missingQueryValue
     case invalidFormat(String)
-    case invalidSource(String)
     case invalidInteger(flag: String, value: String)
     case invalidNumber(flag: String, value: String)
     case invalidDate(flag: String, value: String)
@@ -15,8 +14,6 @@ enum QueryCLIArgumentError: Error, LocalizedError {
             return "missing value for --query"
         case .invalidFormat(let raw):
             return "invalid --format value '\(raw)'; expected text or json"
-        case .invalidSource(let raw):
-            return "invalid --source value '\(raw)'; expected all, mem0, bm25, or a comma-separated combination"
         case let .invalidInteger(flag, value):
             return "invalid \(flag) value '\(value)'; expected a positive integer"
         case let .invalidNumber(flag, value):
@@ -121,7 +118,6 @@ enum QueryCLICommand {
                 "--query",
                 "--question",
                 "--format",
-                "--source",
                 "--start",
                 "--end",
                 "--max-results",
@@ -141,7 +137,6 @@ enum QueryCLICommand {
     }
 
     private static func parseRequestOptions(from arguments: [String]) throws -> MemoryQueryOptions {
-        let sources = try parseSources(raw: argumentValue(flag: "--source", in: arguments))
         let parsedStart = try parseDateArgument(
             flag: "--start",
             value: argumentValue(flag: "--start", in: arguments),
@@ -182,40 +177,11 @@ enum QueryCLICommand {
         }
 
         return MemoryQueryOptions(
-            sources: sources,
             scopeOverride: customScope(start: parsedStart, end: parsedEnd),
             maxResults: maxResults,
             timeoutSeconds: timeoutSeconds,
             allowFallbacks: !(arguments.contains("--no-fallback") || arguments.contains("--strict-agent"))
         )
-    }
-
-    private static func parseSources(raw: String?) throws -> Set<MemoryEvidenceSource> {
-        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty else {
-            return Set(MemoryEvidenceSource.allCases)
-        }
-
-        let lowered = raw.lowercased()
-        if lowered == "all" {
-            return Set(MemoryEvidenceSource.allCases)
-        }
-
-        var output = Set<MemoryEvidenceSource>()
-        for token in lowered.split(separator: ",").map(String.init) {
-            switch token.trimmingCharacters(in: .whitespacesAndNewlines) {
-            case "mem0", "semantic", "mem0_semantic":
-                output.insert(.mem0Semantic)
-            case "bm25", "lexical", "bm25_store":
-                output.insert(.bm25Store)
-            default:
-                throw QueryCLIArgumentError.invalidSource(raw)
-            }
-        }
-
-        guard !output.isEmpty else {
-            throw QueryCLIArgumentError.invalidSource(raw)
-        }
-        return output
     }
 
     private static func parseDateArgument(

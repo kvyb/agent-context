@@ -35,20 +35,17 @@ final class OpenRouterMemoryQueryEvaluator: @unchecked Sendable {
         )
 
         let mem0EvidenceLines = orderedEvidence(trace.mem0Evidence).map(evidenceFormatter.formatLine)
-        let bm25EvidenceLines = orderedEvidence(trace.bm25Evidence).map(evidenceFormatter.formatLine)
         let primaryInput = EvaluationInput(
             answer: trace.result.answer,
             keyPoints: trace.result.keyPoints,
             supportingEvents: trace.result.supportingEvents,
-            mem0EvidenceLines: Array(mem0EvidenceLines.prefix(12)),
-            bm25EvidenceLines: Array(bm25EvidenceLines.prefix(trace.traceRequiresBroaderEvidencePreview ? 20 : 14))
+            mem0EvidenceLines: Array(mem0EvidenceLines.prefix(trace.traceRequiresBroaderEvidencePreview ? 20 : 12))
         )
         let retryInput = EvaluationInput(
             answer: String(trace.result.answer.prefix(2_400)),
             keyPoints: Array(trace.result.keyPoints.prefix(6)),
             supportingEvents: Array(trace.result.supportingEvents.prefix(6)),
-            mem0EvidenceLines: Array(mem0EvidenceLines.prefix(6)),
-            bm25EvidenceLines: Array(bm25EvidenceLines.prefix(10))
+            mem0EvidenceLines: Array(mem0EvidenceLines.prefix(10))
         )
 
         do {
@@ -62,7 +59,6 @@ final class OpenRouterMemoryQueryEvaluator: @unchecked Sendable {
                     scope: trace.result.scope,
                     detailLevel: trace.detailLevel,
                     mem0EvidenceLines: input.mem0EvidenceLines,
-                    bm25EvidenceLines: input.bm25EvidenceLines,
                     keyPoints: input.keyPoints,
                     supportingEvents: input.supportingEvents,
                     apiKey: apiKey
@@ -107,5 +103,4 @@ private struct EvaluationInput {
     let keyPoints: [String]
     let supportingEvents: [String]
     let mem0EvidenceLines: [String]
-    let bm25EvidenceLines: [String]
 }

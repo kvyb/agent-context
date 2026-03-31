@@ -14,7 +14,7 @@ struct MemoryQueryEvidenceFormatter: Sendable {
         let workspaceSuffix = hit.metadata["workspace"]?.nilIfEmpty.map { " | workspace=\($0)" } ?? ""
         let repoSuffix = hit.metadata["repo"]?.nilIfEmpty.map { " | repo=\($0)" } ?? ""
         let titleSuffix = hit.metadata["window_title"]?.nilIfEmpty.map { " | title=\($0)" } ?? ""
-        let score: Double = hit.source == .mem0Semantic ? hit.semanticScore : hit.lexicalScore
+        let score = hit.hybridScore
         return "[\(timestamp)] source=\(hit.source.rawValue) score=\(String(format: "%.2f", score)) app=\(app)\(projectSuffix)\(unitSuffix)\(taskSuffix)\(statusSuffix)\(workspaceSuffix)\(repoSuffix)\(titleSuffix) | memory=\(hit.text)"
     }
 }

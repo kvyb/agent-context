@@ -10,33 +10,18 @@ enum MemoryQueryDetailLevel: String, Sendable {
     case detailed
 }
 
-enum MemoryQueryStepPhase: String, Sendable, Codable {
-    case research
-    case evidence
-}
-
 struct MemoryQueryOptions: Sendable {
-    let sources: Set<MemoryEvidenceSource>
     let scopeOverride: MemoryQueryScope?
     let maxResults: Int?
     let timeoutSeconds: TimeInterval?
     let allowFallbacks: Bool
 
     static let `default` = MemoryQueryOptions(
-        sources: Set(MemoryEvidenceSource.allCases),
         scopeOverride: nil,
         maxResults: nil,
         timeoutSeconds: nil,
         allowFallbacks: true
     )
-
-    var includesSemanticSearch: Bool {
-        sources.contains(.mem0Semantic)
-    }
-
-    var includesLexicalSearch: Bool {
-        sources.contains(.bm25Store)
-    }
 }
 
 struct MemoryQueryRequest: Sendable {
@@ -64,20 +49,8 @@ struct MemoryQueryScope: Sendable, Codable {
     let label: String?
 }
 
-enum MemoryEvidenceSource: String, Codable, Sendable, CaseIterable, Hashable {
+enum MemoryEvidenceSource: String, Codable, Sendable, Hashable {
     case mem0Semantic = "mem0_semantic"
-    case bm25Store = "bm25_store"
-
-    init?(cliValue raw: String) {
-        switch raw.lowercased() {
-        case "mem0", "semantic", "mem0_semantic":
-            self = .mem0Semantic
-        case "bm25", "lexical", "bm25_store":
-            self = .bm25Store
-        default:
-            return nil
-        }
-    }
 }
 
 struct MemoryEvidenceHit: Sendable {
@@ -93,71 +66,6 @@ struct MemoryEvidenceHit: Sendable {
     let hybridScore: Double
 }
 
-struct MemoryQueryPlanStep: Sendable {
-    let query: String
-    let sources: Set<MemoryEvidenceSource>
-    let phase: MemoryQueryStepPhase
-    let maxResults: Int?
-
-    init(
-        query: String,
-        sources: Set<MemoryEvidenceSource> = Set(MemoryEvidenceSource.allCases),
-        phase: MemoryQueryStepPhase = .evidence,
-        maxResults: Int? = nil
-    ) {
-        self.query = query
-        self.sources = sources.isEmpty ? Set(MemoryEvidenceSource.allCases) : sources
-        self.phase = phase
-        self.maxResults = maxResults
-    }
-}
-
-struct MemoryQueryPlan: Sendable {
-    let steps: [MemoryQueryPlanStep]
-    let scope: MemoryQueryScope
-    let detailLevel: MemoryQueryDetailLevel
-
-    init(
-        queries: [String],
-        scope: MemoryQueryScope,
-        detailLevel: MemoryQueryDetailLevel = .concise
-    ) {
-        self.steps = queries.compactMap { query in
-            guard let normalized = query.nilIfEmpty else { return nil }
-            return MemoryQueryPlanStep(query: normalized)
-        }
-        self.scope = scope
-        self.detailLevel = detailLevel
-    }
-
-    init(
-        steps: [MemoryQueryPlanStep],
-        scope: MemoryQueryScope,
-        detailLevel: MemoryQueryDetailLevel = .concise
-    ) {
-        self.steps = steps.compactMap { step in
-            guard let normalized = step.query.nilIfEmpty else { return nil }
-            return MemoryQueryPlanStep(
-                query: normalized,
-                sources: step.sources,
-                phase: step.phase,
-                maxResults: step.maxResults
-            )
-        }
-        self.scope = scope
-        self.detailLevel = detailLevel
-    }
-
-    var queries: [String] {
-        steps.map(\.query)
-    }
-}
-
-struct MemoryQueryPlanResult: Sendable {
-    let plan: MemoryQueryPlan
-    let usage: LLMUsageEvent?
-}
-
 struct MemoryQueryAnswerPayload: Sendable {
     let answer: String
     let keyPoints: [String]
@@ -170,6 +78,11 @@ struct MemoryQueryAnswerResult: Sendable {
     let usage: LLMUsageEvent?
 }
 
+struct MemoryQueryNormalizationResult: Sendable {
+    let queries: [String]
+    let usage: LLMUsageEvent?
+}
+
 struct MemoryQueryResult: Sendable {
     let query: String
     let answer: String
@@ -177,7 +90,6 @@ struct MemoryQueryResult: Sendable {
     let supportingEvents: [String]
     let insufficientEvidence: Bool
     let mem0SemanticCount: Int
-    let bm25StoreCount: Int
     let scope: MemoryQueryScope
     let generatedAt: Date
 }
@@ -191,7 +103,6 @@ enum MemoryQueryAnswerOrigin: String, Sendable {
 struct MemoryQueryExecutionTrace: Sendable {
     let result: MemoryQueryResult
     let mem0Evidence: [MemoryEvidenceHit]
-    let bm25Evidence: [MemoryEvidenceHit]
     let detailLevel: MemoryQueryDetailLevel
     let fullContextMode: Bool
     let answerOrigin: MemoryQueryAnswerOrigin
@@ -206,36 +117,6 @@ protocol SemanticMemoryRetrieving: Sendable {
     ) async -> [MemoryEvidenceHit]
 }
 
-protocol LexicalMemoryRetrieving: Sendable {
-    func retrieve(
-        queries: [String],
-        scope: MemoryQueryScope,
-        limit: Int,
-        contextQuestion: String?
-    ) async -> [MemoryEvidenceHit]
-}
-
-extension LexicalMemoryRetrieving {
-    func retrieve(queries: [String], scope: MemoryQueryScope, limit: Int) async -> [MemoryEvidenceHit] {
-        await retrieve(
-            queries: queries,
-            scope: scope,
-            limit: limit,
-            contextQuestion: nil
-        )
-    }
-}
-
-protocol MemoryQueryPlanning: Sendable {
-    func plan(
-        question: String,
-        now: Date,
-        detailLevel: MemoryQueryDetailLevel,
-        timeZone: TimeZone,
-        timeoutSeconds: TimeInterval?
-    ) async -> MemoryQueryPlanResult?
-}
-
 protocol MemoryQueryAnswering: Sendable {
     func answer(
         question: String,
@@ -245,9 +126,18 @@ protocol MemoryQueryAnswering: Sendable {
         now: Date,
         timeZone: TimeZone,
         mem0Evidence: [MemoryEvidenceHit],
-        bm25Evidence: [MemoryEvidenceHit],
         timeoutSeconds: TimeInterval?
     ) async -> MemoryQueryAnswerResult?
+}
+
+protocol MemoryQueryNormalizing: Sendable {
+    func normalize(
+        question: String,
+        scope: MemoryQueryScope,
+        now: Date,
+        timeZone: TimeZone,
+        timeoutSeconds: TimeInterval?
+    ) async -> MemoryQueryNormalizationResult?
 }
 
 protocol UsageEventWriting: Sendable {

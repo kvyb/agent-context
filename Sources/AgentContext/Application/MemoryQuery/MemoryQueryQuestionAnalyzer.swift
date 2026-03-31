@@ -26,6 +26,7 @@ struct MemoryQueryQuestionAnalyzer: Sendable {
         let requestedDimensions = extractionSupport.requestedDimensions(for: question)
         let focusTerms = extractionSupport.focusTerms(for: question, requestedDimensions: requestedDimensions)
         let personTerms = extractionSupport.personTerms(for: question)
+        let inferredScope = scopeParser.inferScope(for: question)
         let mentionsZoom = lowered.contains("zoom")
         let prefersLexicalFirst = MemoryQueryQuestionLexicon.transcriptLikeTerms.contains { lowered.contains($0) }
         let mentionsCallMedium = lowered.contains("call")
@@ -46,7 +47,12 @@ struct MemoryQueryQuestionAnalyzer: Sendable {
             || asksWhichCallsHappened
         let seeksEvaluation = MemoryQueryQuestionLexicon.evaluationTerms.contains { lowered.contains($0) }
         let seeksWorkSummary = MemoryQueryQuestionLexicon.workSummaryTerms.contains { lowered.contains($0) }
+        let hasBroadRelativeScope = {
+            guard let start = inferredScope.start, let end = inferredScope.end else { return false }
+            return end.timeIntervalSince(start) >= 36 * 3600
+        }()
         let prefersDetailedAnswer = scopeParser.hasExplicitDate(in: question)
+            || hasBroadRelativeScope
             || !requestedDimensions.isEmpty
             || MemoryQueryQuestionLexicon.detailedTerms.contains { lowered.contains($0) }
 

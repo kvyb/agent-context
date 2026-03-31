@@ -17,14 +17,10 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
         scopeLabel: String?,
         detailLevel: MemoryQueryDetailLevel,
         mem0Evidence: [MemoryEvidenceHit],
-        bm25Evidence: [MemoryEvidenceHit],
         fullContextMode: Bool = false
     ) -> MemoryQueryAnswerPayload {
         let analysis = questionAnalyzer.analyze(question: question)
-        let combinedEvidence = combinedEvidence(
-            mem0Evidence: mem0Evidence,
-            bm25Evidence: bm25Evidence
-        )
+        let combinedEvidence = deduplicatedEvidence(mem0Evidence)
 
         if let dimensionAwareAnswer = buildDimensionAwareAnswer(
             question: question,
@@ -43,12 +39,14 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
         } else {
             evidenceLimit = detailLevel == .detailed ? 8 : 5
         }
-        let topEvidence = Array(combinedEvidence.prefix(evidenceLimit))
-        let scopedSuffix = scopeLabel?.nilIfEmpty.map { " for \($0)" } ?? ""
-        let sourceSummary = sourceSummary(
-            mem0Count: mem0Evidence.count,
-            bm25Count: bm25Evidence.count
+        let topEvidence = MemoryQueryEvidenceSelection.prioritizedSubset(
+            from: combinedEvidence,
+            limit: evidenceLimit,
+            detailLevel: detailLevel,
+            analysis: analysis
         )
+        let scopedSuffix = scopeLabel?.nilIfEmpty.map { " for \($0)" } ?? ""
+        let sourceSummary = sourceSummary(mem0Count: mem0Evidence.count)
 
         var paragraphs: [String] = [
             "For \"\(question)\", I found \(combinedEvidence.count) relevant memory hit\(combinedEvidence.count == 1 ? "" : "s")\(scopedSuffix) across \(sourceSummary)."
@@ -100,7 +98,12 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
         } else {
             evidenceLimit = detailLevel == .detailed ? 14 : 8
         }
-        let topEvidence = Array(rankedEvidence.prefix(evidenceLimit))
+        let topEvidence = MemoryQueryEvidenceSelection.prioritizedSubset(
+            from: rankedEvidence,
+            limit: evidenceLimit,
+            detailLevel: detailLevel,
+            analysis: analysis
+        )
         let dimensionLimit = detailLevel == .detailed ? 6 : 4
         var dimensionSections: [String] = []
         var dimensionKeyPoints: [String] = []
@@ -120,10 +123,7 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
         }
 
         let scopedSuffix = scopeLabel?.nilIfEmpty.map { " for \($0)" } ?? ""
-        let sourceSummary = sourceSummary(
-            mem0Count: evidence.filter { $0.source == .mem0Semantic }.count,
-            bm25Count: evidence.filter { $0.source == .bm25Store }.count
-        )
+        let sourceSummary = sourceSummary(mem0Count: evidence.count)
         let assessment = provisionalAssessment(
             question: question,
             evidence: topEvidence,
@@ -166,20 +166,12 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
         )
     }
 
-    private func combinedEvidence(
-        mem0Evidence: [MemoryEvidenceHit],
-        bm25Evidence: [MemoryEvidenceHit]
-    ) -> [MemoryEvidenceHit] {
-        let ordered = (bm25Evidence + mem0Evidence).sorted { lhs, rhs in
-            let lhsScore = sourceScore(lhs)
-            let rhsScore = sourceScore(rhs)
-            if abs(lhsScore - rhsScore) > 0.0001 {
-                return lhsScore > rhsScore
+    private func deduplicatedEvidence(_ evidence: [MemoryEvidenceHit]) -> [MemoryEvidenceHit] {
+        let ordered = evidence.sorted {
+            if abs($0.semanticScore - $1.semanticScore) > 0.0001 {
+                return $0.semanticScore > $1.semanticScore
             }
-            if lhs.source != rhs.source {
-                return lhs.source == .bm25Store
-            }
-            return (lhs.occurredAt ?? .distantPast) > (rhs.occurredAt ?? .distantPast)
+            return ($0.occurredAt ?? .distantPast) > ($1.occurredAt ?? .distantPast)
         }
 
         var seen = Set<String>()
@@ -192,27 +184,8 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
         return deduplicated
     }
 
-    private func sourceScore(_ hit: MemoryEvidenceHit) -> Double {
-        switch hit.source {
-        case .mem0Semantic:
-            return hit.semanticScore
-        case .bm25Store:
-            return hit.hybridScore
-        }
-    }
-
-    private func sourceSummary(mem0Count: Int, bm25Count: Int) -> String {
-        var parts: [String] = []
-        if bm25Count > 0 {
-            parts.append("BM25 storage (\(bm25Count))")
-        }
-        if mem0Count > 0 {
-            parts.append("semantic memory (\(mem0Count))")
-        }
-        if parts.isEmpty {
-            return "the enabled memory sources"
-        }
-        return naturalLanguageJoin(parts)
+    private func sourceSummary(mem0Count: Int) -> String {
+        mem0Count > 0 ? "Mem0 (\(mem0Count))" : "Mem0"
     }
 
     private func evidenceClause(_ hit: MemoryEvidenceHit) -> String {
@@ -422,6 +395,10 @@ struct MemoryQueryFallbackAnswerBuilder: Sendable {
             score += 0.12
         }
         return score
+    }
+
+    private func sourceScore(_ hit: MemoryEvidenceHit) -> Double {
+        hit.hybridScore
     }
 
     private func isDirectTranscriptEvidence(_ hit: MemoryEvidenceHit) -> Bool {

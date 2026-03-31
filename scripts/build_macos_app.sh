@@ -53,6 +53,12 @@ else
   echo "warning: scripts/mem0_search.py not found; Mem0 semantic search from app bundle will be disabled."
 fi
 
+if [[ -f "${PROJECT_ROOT}/scripts/mem0_common.py" ]]; then
+  cp "${PROJECT_ROOT}/scripts/mem0_common.py" "${APP_BUNDLE_PATH}/Contents/Resources/mem0_common.py"
+else
+  echo "warning: scripts/mem0_common.py not found; bundled Mem0 helpers may fail to import."
+fi
+
 cat > "${APP_BUNDLE_PATH}/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

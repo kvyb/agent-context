@@ -145,9 +145,9 @@ private enum RootCLICommand {
         """
         Usage:
           \(programName) [--cli]
-          \(programName) query "<question>" [--json|--format text|json] [--source all|mem0|bm25] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS|none]
-          \(programName) evaluate-query "<question>" [--json|--format text|json] [--source all|mem0|bm25] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS|none]
-          \(programName) --query "<question>" [--format text|json] [--source all|mem0|bm25] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS|none]
+          \(programName) query "<question>" [--json|--format text|json] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS|none]
+          \(programName) evaluate-query "<question>" [--json|--format text|json] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS|none]
+          \(programName) --query "<question>" [--format text|json] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--max-results N] [--timeout SECONDS|none]
           \(programName) --set-user-aliases "<alias1,alias2,...>"
           \(programName) --help
           \(programName) --version
