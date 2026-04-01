@@ -5,6 +5,8 @@ final class TrackerAgent: @unchecked Sendable {
     var onRecordingStateChanged: ((Bool) -> Void)?
     var onTranscriptStateChanged: ((Bool, Date?) -> Void)?
 
+    private let recordingStateLock = NSLock()
+
     private let config: TrackerConfig
     private let database: SQLiteStore
     private let logger: RuntimeLog
@@ -39,6 +41,7 @@ final class TrackerAgent: @unchecked Sendable {
     private let screenshotSimilaritySkipThreshold = 0.9975
     private let initialFrontmostBootstrapDelaySeconds: TimeInterval = 0.25
     private let initialFrontmostBootstrapMaxAttempts = 20
+    private var recordingState = false
 
     init(
         config: TrackerConfig,
@@ -75,6 +78,14 @@ final class TrackerAgent: @unchecked Sendable {
     }
 
     func start() {
+        recordingStateLock.lock()
+        let shouldStart = !recordingState
+        if shouldStart {
+            recordingState = true
+        }
+        recordingStateLock.unlock()
+        guard shouldStart else { return }
+
         stateQueue.async { [weak self] in
             guard let self, !self.isRunning else { return }
 
@@ -97,6 +108,14 @@ final class TrackerAgent: @unchecked Sendable {
     }
 
     func stop(finalizePendingWork: Bool) {
+        recordingStateLock.lock()
+        let shouldStop = recordingState
+        if shouldStop {
+            recordingState = false
+        }
+        recordingStateLock.unlock()
+        guard shouldStop else { return }
+
         stateQueue.async { [weak self] in
             guard let self, self.isRunning else { return }
 
@@ -108,6 +127,11 @@ final class TrackerAgent: @unchecked Sendable {
             self.stopRetryTimer()
             self.audioCoordinator.stopTranscript()
             self.closeActiveInterval(at: Date())
+            self.activeApp = nil
+            self.activeIntervalID = nil
+            self.activeIntervalStart = nil
+            self.activeWindowContext = WindowContext(title: nil, documentPath: nil, url: nil, workspace: nil, project: nil)
+            self.screenshotSequence = 0
             DispatchQueue.main.async {
                 self.onRecordingStateChanged?(false)
             }
@@ -137,7 +161,10 @@ final class TrackerAgent: @unchecked Sendable {
     }
 
     func isRecording() -> Bool {
-        stateQueue.sync { isRunning }
+        recordingStateLock.lock()
+        let running = recordingState
+        recordingStateLock.unlock()
+        return running
     }
 
     func isTranscriptRunning() -> Bool {

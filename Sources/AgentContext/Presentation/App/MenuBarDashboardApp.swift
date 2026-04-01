@@ -248,6 +248,11 @@ struct OpenRouterModelOption: Identifiable, Hashable, Sendable {
     }
 }
 
+enum RecordingActionState {
+    case starting
+    case stopping
+}
+
 @MainActor
 final class ActivityDashboardStore: ObservableObject {
     private let usageSupport = DashboardUsageSupport()
@@ -307,6 +312,8 @@ final class ActivityDashboardStore: ObservableObject {
     private var refreshTimer: Timer?
     private var transcriptTimer: Timer?
     private var memoryQueryTask: Task<Void, Never>?
+    private var shouldHideDashboardAfterRecordingStarts = false
+    @Published private(set) var recordingActionState: RecordingActionState?
 
     init(runtime: TrackerRuntime) {
         self.runtime = runtime
@@ -319,7 +326,15 @@ final class ActivityDashboardStore: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.isRecording = running
+                self.recordingActionState = nil
                 self.onRecordingStateChanged?(running)
+                if running, self.shouldHideDashboardAfterRecordingStarts {
+                    self.shouldHideDashboardAfterRecordingStarts = false
+                    self.isSettingsPresented = false
+                    NSApp.hide(nil)
+                } else if !running {
+                    self.shouldHideDashboardAfterRecordingStarts = false
+                }
                 if !running {
                     self.isTranscriptRunning = false
                     self.onTranscriptStateChanged?(false)
@@ -356,19 +371,76 @@ final class ActivityDashboardStore: ObservableObject {
         refreshWeekUsage()
     }
 
-    func startRecording() {
-        let settings = runtime.loadSettings()
-        if !settings.includeSelfAppInTracking {
-            isSettingsPresented = false
-            onCloseDashboard?()
+    private func syncRecordingStateFromRuntime() {
+        let runtimeRecording = runtime.isRecording
+        let runtimeTranscript = runtime.isTranscriptRunning
+
+        if isRecording != runtimeRecording {
+            isRecording = runtimeRecording
+            onRecordingStateChanged?(runtimeRecording)
         }
+
+        if isTranscriptRunning != runtimeTranscript {
+            isTranscriptRunning = runtimeTranscript
+            onTranscriptStateChanged?(runtimeTranscript)
+            if runtimeTranscript {
+                startTranscriptTimer(startedAt: runtime.currentTranscriptStartedAt ?? Date())
+            } else {
+                stopTranscriptTimer()
+            }
+        }
+    }
+
+    private func scheduleRecordingActionStateClear(expectedState: RecordingActionState) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            guard self.recordingActionState == expectedState else { return }
+            self.syncRecordingStateFromRuntime()
+            self.recordingActionState = nil
+        }
+    }
+
+    var recordingButtonTitle: String {
+        switch recordingActionState {
+        case .starting:
+            return "Starting..."
+        case .stopping:
+            return "Stopping..."
+        case nil:
+            return isRecording ? "Stop Recording" : "Start Recording"
+        }
+    }
+
+    func startRecording() {
+        syncRecordingStateFromRuntime()
+        guard !isRecording else { return }
+        shouldHideDashboardAfterRecordingStarts = !runtime.loadSettings().includeSelfAppInTracking
+        recordingActionState = .starting
         runtime.startRecording()
+        syncRecordingStateFromRuntime()
+        scheduleRecordingActionStateClear(expectedState: .starting)
         refreshDashboard()
     }
 
     func stopRecording() {
+        syncRecordingStateFromRuntime()
+        guard isRecording else { return }
+        shouldHideDashboardAfterRecordingStarts = false
+        recordingActionState = .stopping
         runtime.stopRecording(finalizePendingWork: false)
+        syncRecordingStateFromRuntime()
+        scheduleRecordingActionStateClear(expectedState: .stopping)
         refreshDashboard()
+    }
+
+    func toggleRecording() {
+        syncRecordingStateFromRuntime()
+        guard recordingActionState == nil else { return }
+        if isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
     }
 
     func startTranscript() {
@@ -418,6 +490,7 @@ final class ActivityDashboardStore: ObservableObject {
     }
 
     func refreshDashboard() {
+        syncRecordingStateFromRuntime()
         Task {
             do {
                 let snapshot = try await runtime.fetchDashboard(day: selectedDay)
@@ -840,13 +913,10 @@ struct ActivityDashboardView: View {
 
     private var topBar: some View {
         HStack(spacing: 10) {
-            Button(store.isRecording ? "Stop Recording" : "Start Recording") {
-                if store.isRecording {
-                    store.stopRecording()
-                } else {
-                    store.startRecording()
-                }
+            Button(store.recordingButtonTitle) {
+                store.toggleRecording()
             }
+            .disabled(store.recordingActionState != nil)
             .keyboardShortcut("r", modifiers: [.command, .shift])
 
             Button(store.isTranscriptRunning ? "Stop Transcript" : "Start Transcript") {
