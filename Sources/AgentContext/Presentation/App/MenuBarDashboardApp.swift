@@ -357,6 +357,11 @@ final class ActivityDashboardStore: ObservableObject {
     }
 
     func startRecording() {
+        let settings = runtime.loadSettings()
+        if !settings.includeSelfAppInTracking {
+            isSettingsPresented = false
+            onCloseDashboard?()
+        }
         runtime.startRecording()
         refreshDashboard()
     }
